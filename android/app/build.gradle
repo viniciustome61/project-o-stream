@@ -25,10 +25,17 @@ android {
         versionName '0.1.0'
     }
 
+    def cmKeystorePath = System.getenv('CM_KEYSTORE_PATH')
+    def hasCodemagicSigning = cmKeystorePath != null &&
+            !cmKeystorePath.isBlank() &&
+            System.getenv('CM_KEYSTORE_PASSWORD') != null &&
+            System.getenv('CM_KEY_ALIAS') != null &&
+            System.getenv('CM_KEY_PASSWORD') != null
+
     signingConfigs {
         release {
-            if (System.getenv('CI')) {
-                storeFile file(System.getenv('CM_KEYSTORE_PATH'))
+            if (hasCodemagicSigning) {
+                storeFile file(cmKeystorePath)
                 storePassword System.getenv('CM_KEYSTORE_PASSWORD')
                 keyAlias System.getenv('CM_KEY_ALIAS')
                 keyPassword System.getenv('CM_KEY_PASSWORD')
@@ -38,7 +45,9 @@ android {
 
     buildTypes {
         release {
-            signingConfig signingConfigs.release
+            if (hasCodemagicSigning) {
+                signingConfig signingConfigs.release
+            }
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
