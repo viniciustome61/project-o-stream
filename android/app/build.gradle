@@ -7,6 +7,7 @@ plugins {
 android {
     namespace 'com.projecto.stream'
     compileSdk 35
+    ndkVersion flutter.ndkVersion
 
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_11
@@ -23,6 +24,12 @@ android {
         targetSdk 35
         versionCode 1
         versionName '0.1.0'
+    }
+
+    packaging {
+        jniLibs {
+            pickFirsts += ['**/libcrypto.so', '**/libssl.so']
+        }
     }
 
     def cmKeystorePath = System.getenv('CM_KEYSTORE_PATH')
@@ -58,6 +65,11 @@ android {
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
     }
+}
+
+repositories {
+    google()
+    mavenCentral()
 }
 
 flutter {

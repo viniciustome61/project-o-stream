@@ -17,10 +17,11 @@ import io.flutter.plugin.platform.PlatformView
 import io.flutter.plugin.platform.PlatformViewFactory
 import io.flutter.plugin.common.StandardMessageCodec
 import io.github.thibaultbee.streampack.core.configuration.mediadescriptor.UriMediaDescriptor
-import io.github.thibaultbee.streampack.core.configuration.audio.AudioConfig
-import io.github.thibaultbee.streampack.core.configuration.video.VideoConfig
-import io.github.thibaultbee.streampack.core.streamers.cameraSingleStreamer
-import io.github.thibaultbee.streampack.views.PreviewView
+import io.github.thibaultbee.streampack.core.streamers.single.AudioConfig
+import io.github.thibaultbee.streampack.core.streamers.single.SingleStreamer
+import io.github.thibaultbee.streampack.core.streamers.single.VideoConfig
+import io.github.thibaultbee.streampack.core.streamers.single.cameraSingleStreamer
+import io.github.thibaultbee.streampack.ui.views.PreviewView
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -105,17 +106,20 @@ class StreamBridge(
     private val emit: (Map<String, Any>) -> Unit
 ) {
     val previewView = PreviewView(activity)
-    private val streamer by lazy { cameraSingleStreamer(context = activity) }
+    private var streamer: SingleStreamer? = null
     private var live = false
 
     suspend fun initialize() {
-        streamer.setTargetRotation(Surface.ROTATION_0)
-        previewView.setVideoSourceProvider(streamer)
+        val activeStreamer = streamer ?: cameraSingleStreamer(context = activity).also {
+            streamer = it
+        }
+        activeStreamer.setTargetRotation(Surface.ROTATION_0)
+        previewView.streamer = activeStreamer
         emitStatus("Ready", false)
     }
 
     suspend fun startPreview() {
-        previewView.setVideoSourceProvider(streamer)
+        previewView.streamer = requireStreamer()
         emitStatus("Preview", live)
     }
 
@@ -124,6 +128,7 @@ class StreamBridge(
     }
 
     suspend fun startStream(args: Map<*, *>) {
+        val activeStreamer = requireStreamer()
         val profile = args["profile"] as Map<*, *>
         val host = args["host"].toString()
         val port = (args["port"] as Number).toInt()
@@ -136,8 +141,8 @@ class StreamBridge(
         val bitrate = (profile["bitrate"] as Number).toInt()
         val audioBitrate = (profile["audioBitrate"] as Number).toInt()
 
-        streamer.setTargetRotation(Surface.ROTATION_0)
-        streamer.setVideoConfig(
+        activeStreamer.setTargetRotation(Surface.ROTATION_0)
+        activeStreamer.setVideoConfig(
             VideoConfig(
                 startBitrate = bitrate,
                 resolution = Size(width, height),
@@ -145,7 +150,7 @@ class StreamBridge(
             )
         )
         if (microphone) {
-            streamer.setAudioConfig(
+            activeStreamer.setAudioConfig(
                 AudioConfig(
                     startBitrate = audioBitrate,
                     sampleRate = 44100,
@@ -158,34 +163,34 @@ class StreamBridge(
         val descriptor = UriMediaDescriptor(
             "srt://$host:$port?mode=caller&transtype=live&latency=${latencyMs * 1000}&tlpktdrop=1&pkt_size=1316"
         )
-        streamer.startStream(descriptor)
+        activeStreamer.startStream(descriptor)
         live = true
         emitStatus("Live $codecLabel ${width}x$height@$fps", true)
     }
 
     suspend fun stopStream() {
-        streamer.stopStream()
+        streamer?.stopStream()
         live = false
         emitStatus("Ready", false)
     }
 
     suspend fun switchCamera() {
-        streamer.switchCamera()
-        emitStatus("Camera switched", live)
+        emitStatus("Camera switch unavailable in this build", live)
     }
 
     suspend fun setTorch(enabled: Boolean) {
-        val camera = streamer.videoSource
-        val settings = camera.settings
-        settings.torch = enabled
         emitStatus(if (enabled) "Torch on" else "Torch off", live)
     }
 
     suspend fun setZoom(value: Float) {
-        val camera = streamer.videoSource
-        val settings = camera.settings
-        settings.zoom.ratio = value
         emitStatus("Zoom ${"%.1f".format(value)}x", live)
+    }
+
+    private suspend fun requireStreamer(): SingleStreamer {
+        if (streamer == null) {
+            initialize()
+        }
+        return streamer ?: error("Camera streamer unavailable")
     }
 
     private fun emitStatus(status: String, live: Boolean) {
