@@ -118,6 +118,7 @@ project-o-stream/                ← Flutter project root (pubspec.yaml here)
 │
 ├── docs/
 │   ├── ARCHITECTURE.md
+│   ├── CI.md
 │   ├── PROTOCOL.md
 │   └── DEPLOYMENT.md
 │
@@ -293,6 +294,10 @@ Additional toggles per session:
 
 ## Mobile Build
 
+Codemagic should use `codemagic.yaml` from the repository root. A `mobile/`
+symlink compatibility path is present only for Codemagic UI workflows that still
+run from `/clone/mobile`.
+
 ### Android
 
 ```powershell
@@ -385,6 +390,7 @@ Requirements on the target machine: **Tailscale** + **ffmpeg in PATH** (or ffmpe
 | Doc                                           | Contents                                                  |
 | --------------------------------------------- | --------------------------------------------------------- |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Component map, media path, design rules                   |
+| [`docs/CI.md`](docs/CI.md)                     | Codemagic workflow and Android CI build notes             |
 | [`docs/PROTOCOL.md`](docs/PROTOCOL.md)         | SRT parameters, discovery payload schema, OBS integration |
 | [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)     | Step-by-step deployment for workstation and mobile        |
 
