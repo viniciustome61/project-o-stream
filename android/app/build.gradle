@@ -61,7 +61,13 @@ android {
 }
 
 flutter {
-    source '../..'
+    def rootFlutterProject = file('../..')
+    def mobileFlutterProject = file('../../mobile')
+    source mobileFlutterProject.exists() &&
+            file('../../mobile/.dart_tool/package_config.json').exists() &&
+            !file('../../.dart_tool/package_config.json').exists()
+            ? '../../mobile'
+            : '../..'
 }
 
 dependencies {
