@@ -4,6 +4,8 @@ vendor/
 # Dependencies
 node_modules/
 .dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
 .packages
 ios/Pods/
 ios/.symlinks/

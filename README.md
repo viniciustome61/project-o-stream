@@ -9,10 +9,10 @@ Project O Stream is a production-grade native mobile camera ingest stack for OBS
 ## How It Works
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│  Mobile Device (Android / iOS)                                  │
-│                                                                 │
-│  Camera sensor                                                  │
+┌────────────────────────────────────────────────────────────────┐
+│  Mobile Device (Android / iOS)                                 │
+│                                                                │
+│  Camera sensor                                                 │
 │    └─► Hardware H.264 / H.265 encoder                          │
 │           └─► SRT sender  ──────────────────────────────────┐  │
 └─────────────────────────────────────────────────────────────│──┘
@@ -129,30 +129,30 @@ project-o-stream/
 
 ### PC Workstation
 
-| Requirement | Notes |
-|-------------|-------|
-| Windows 10/11 | PowerShell 5.1+ included |
-| [Tailscale](https://tailscale.com/download) | Must be connected and authenticated |
-| [ffmpeg](https://ffmpeg.org/download.html) | In `PATH`, **or** place `ffmpeg.exe` at `C:\Users\kings\Downloads\moviesLab\mpv\ffmpeg.exe` |
-| OBS Studio | Portable build under `vendor/obs-portable/`, or any installed OBS |
+| Requirement                              | Notes                                                                                                   |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| Windows 10/11                            | PowerShell 5.1+ included                                                                                |
+| [Tailscale](https://tailscale.com/download) | Must be connected and authenticated                                                                     |
+| [ffmpeg](https://ffmpeg.org/download.html)  | In `PATH`, **or** place `ffmpeg.exe` at `C:\Users\kings\Downloads\moviesLab\mpv\ffmpeg.exe` |
+| OBS Studio                               | Portable build under `vendor/obs-portable/`, or any installed OBS                                     |
 
 ### Mobile Device
 
-| Requirement | Android | iOS |
-|-------------|---------|-----|
-| OS version | Android 8.0+ (API 26) | iOS 13.0+ |
-| Tailscale app | Same tailnet as PC | Same tailnet as PC |
-| Hardware encoder | H.264 required, H.265 optional | H.264 required (H.265 optional) |
-| SRT transport | StreamPack 3.1.2 (bundled) | Requires `libsrt.xcframework` — see [iOS Build](#ios-build) |
+| Requirement      | Android                        | iOS                                                         |
+| ---------------- | ------------------------------ | ----------------------------------------------------------- |
+| OS version       | Android 8.0+ (API 26)          | iOS 13.0+                                                   |
+| Tailscale app    | Same tailnet as PC             | Same tailnet as PC                                          |
+| Hardware encoder | H.264 required, H.265 optional | H.264 required (H.265 optional)                             |
+| SRT transport    | StreamPack 3.1.2 (bundled)     | Requires `libsrt.xcframework` — see [iOS Build](#ios-build) |
 
 ### Development (to build the mobile app)
 
-| Tool | Required for |
-|------|-------------|
-| [Flutter SDK](https://docs.flutter.dev/get-started/install) 3.4+ | All mobile builds |
-| Android Studio + Android SDK | Android builds |
-| macOS + Xcode 14+ | iOS builds only |
-| CocoaPods | iOS dependency management |
+| Tool                                                          | Required for              |
+| ------------------------------------------------------------- | ------------------------- |
+| [Flutter SDK](https://docs.flutter.dev/get-started/install) 3.4+ | All mobile builds         |
+| Android Studio + Android SDK                                  | Android builds            |
+| macOS + Xcode 14+                                             | iOS builds only           |
+| CocoaPods                                                     | iOS dependency management |
 
 ---
 
@@ -203,6 +203,7 @@ udp://127.0.0.1:15000
 ```
 
 Recommended OBS Media Source settings:
+
 - **Buffering**: `0 ms` (or as low as possible)
 - **Use hardware decoding when available**: ✓ (optional but reduces CPU)
 - **Restart playback when source becomes active**: ✓
@@ -216,6 +217,7 @@ Recommended OBS Media Source settings:
 ### 5. Open the mobile app
 
 Install the Flutter app on your device (see [Mobile Build](#mobile-build)). On launch it automatically:
+
 1. Starts the camera preview
 2. Sends discovery probes on UDP 7071 to find the receiver
 3. Listens on UDP 7072 for the PC's unsolicited offer pulse
@@ -231,12 +233,12 @@ Tap the red circle button to go live. The top bar shows connection status and st
 .\server\start-receiver.ps1 [-SrtPort <int>] [-ObsUdpPort <int>] [-LatencyMs <int>] [-NoDiscovery]
 ```
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `-SrtPort` | `7070` | UDP port the SRT listener binds to |
-| `-ObsUdpPort` | `15000` | Local UDP port forwarded to OBS |
-| `-LatencyMs` | `80` | SRT end-to-end latency budget in milliseconds |
-| `-NoDiscovery` | off | Skip launching the discovery daemon |
+| Parameter        | Default   | Description                                   |
+| ---------------- | --------- | --------------------------------------------- |
+| `-SrtPort`     | `7070`  | UDP port the SRT listener binds to            |
+| `-ObsUdpPort`  | `15000` | Local UDP port forwarded to OBS               |
+| `-LatencyMs`   | `80`    | SRT end-to-end latency budget in milliseconds |
+| `-NoDiscovery` | off       | Skip launching the discovery daemon           |
 
 **Example — lower latency on a reliable LAN:**
 
@@ -254,12 +256,12 @@ Tap the red circle button to go live. The top bar shows connection status and st
 
 ## Network Ports
 
-| Port | Protocol | Direction | Purpose |
-|------|----------|-----------|---------|
-| 7070 | UDP (SRT) | Mobile → PC | Live video/audio stream |
-| 7071 | UDP | Mobile → PC | Discovery probe (`PROJECTO_STREAM_DISCOVER`) |
-| 7072 | UDP | PC → Mobile | Receiver offer pulse (JSON) |
-| 15000 | UDP (MPEG-TS) | PC → PC (local) | OBS media source input |
+| Port  | Protocol      | Direction        | Purpose                                        |
+| ----- | ------------- | ---------------- | ---------------------------------------------- |
+| 7070  | UDP (SRT)     | Mobile → PC     | Live video/audio stream                        |
+| 7071  | UDP           | Mobile → PC     | Discovery probe (`PROJECTO_STREAM_DISCOVER`) |
+| 7072  | UDP           | PC → Mobile     | Receiver offer pulse (JSON)                    |
+| 15000 | UDP (MPEG-TS) | PC → PC (local) | OBS media source input                         |
 
 All traffic between devices travels inside the Tailscale WireGuard tunnel — no router port-forwarding needed.
 
@@ -269,13 +271,14 @@ All traffic between devices travels inside the Tailscale WireGuard tunnel — no
 
 The mobile app offers three built-in profiles selectable from the settings panel:
 
-| Profile | Resolution | FPS | Video bitrate | Audio bitrate |
-|---------|-----------|-----|--------------|--------------|
-| **1080p30** | 1080 × 1920 | 30 | 12 Mbps | 128 kbps |
-| **4K30** *(default)* | 2160 × 3840 | 30 | 50 Mbps | 128 kbps |
-| **4K60** | 2160 × 3840 | 60 | 90 Mbps | 128 kbps |
+| Profile                      | Resolution   | FPS | Video bitrate | Audio bitrate |
+| ---------------------------- | ------------ | --- | ------------- | ------------- |
+| **1080p30**            | 1080 × 1920 | 30  | 12 Mbps       | 128 kbps      |
+| **4K30** *(default)* | 2160 × 3840 | 30  | 50 Mbps       | 128 kbps      |
+| **4K60**               | 2160 × 3840 | 60  | 90 Mbps       | 128 kbps      |
 
 Additional toggles per session:
+
 - **HEVC** — switch encoder from H.264 to H.265 (reduces bitrate for same quality)
 - **Mic** — include device microphone audio in the stream
 - **SRT latency** — slider from 40 ms to 240 ms (adjust to match network conditions)
@@ -299,7 +302,7 @@ flutter build apk --release
 
 Android streaming uses **StreamPack 3.1.2** (`io.github.thibaultbee.streampack`), which drives the device's hardware encoder and SRT output natively. No extra native libraries needed.
 
-Minimum SDK: Android 8.0 (API 26).  
+Minimum SDK: Android 8.0 (API 26).
 Target SDK: 35.
 
 ### iOS Build
@@ -318,6 +321,7 @@ Then in Xcode: select your device → Build & Run (`⌘R`).
 
 > **SRT streaming on iOS requires `libsrt.xcframework`.**
 > The camera preview, discovery, and UI all work immediately. To enable actual video streaming:
+>
 > 1. Download `libsrt.xcframework` from the [SRT Alliance releases](https://github.com/Haivision/srt/releases) or build from source on macOS.
 > 2. In Xcode: select the **Runner** target → **General** → **Frameworks, Libraries, and Embedded Content** → **+** → add `libsrt.xcframework`.
 > 3. Implement `captureOutput(_:didOutput:from:)` in `CameraController.swift` to feed sample buffers into the SRT muxer.
@@ -377,11 +381,11 @@ Requirements on the target machine: **Tailscale** + **ffmpeg in PATH** (or ffmpe
 
 ## Documentation
 
-| Doc | Contents |
-|-----|----------|
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Component map, media path, design rules |
-| [`docs/PROTOCOL.md`](docs/PROTOCOL.md) | SRT parameters, discovery payload schema, OBS integration |
-| [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) | Step-by-step deployment for workstation and mobile |
+| Doc                                           | Contents                                                  |
+| --------------------------------------------- | --------------------------------------------------------- |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Component map, media path, design rules                   |
+| [`docs/PROTOCOL.md`](docs/PROTOCOL.md)         | SRT parameters, discovery payload schema, OBS integration |
+| [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)     | Step-by-step deployment for workstation and mobile        |
 
 ---
 
