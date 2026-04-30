@@ -47,16 +47,18 @@ workflows:
     scripts:
       - name: Get dependencies
         script: flutter pub get
+      - name: Set up iOS signing
+        script: xcode-project use-profiles
       - name: Install pods
         working_directory: ios
         script: pod install
-      - name: Build iOS
+      - name: Build IPA
         script: |
-          flutter build ios --release \
+          flutter build ipa --release \
             --export-options-plist=/Users/builder/export_options.plist
     artifacts:
-      - build/ios/iphoneos/*.app
-      - "*.ipa"
+      - build/ios/ipa/*.ipa
+      - build/ios/archive/*.xcarchive
     publishing:
       app_store_connect:
         auth: integration

@@ -171,9 +171,9 @@ class _SenderScreenState extends State<SenderScreen> {
                   begin: Alignment.topCenter,
                   end: Alignment.bottomCenter,
                   colors: [
-                    Colors.black.withOpacity(.55),
+                    Colors.black.withValues(alpha: .55),
                     Colors.transparent,
-                    Colors.black.withOpacity(.75),
+                    Colors.black.withValues(alpha: .75),
                   ],
                 ),
               ),
@@ -342,7 +342,7 @@ class _SettingsPanel extends StatelessWidget {
       margin: const EdgeInsets.symmetric(horizontal: 16),
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        color: Colors.black.withOpacity(.58),
+        color: Colors.black.withValues(alpha: .58),
         borderRadius: BorderRadius.circular(12),
         border: Border.all(color: Colors.white12),
       ),
