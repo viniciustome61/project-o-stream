@@ -1,0 +1,46 @@
+# OBS portable vendor binaries — too large for git; user provides separately
+vendor/
+
+# Dependencies
+node_modules/
+.dart_tool/
+.packages
+ios/Pods/
+ios/.symlinks/
+android/.gradle/
+local.properties
+
+# Build outputs
+build/
+dist/
+out/
+target/
+*.apk
+*.aab
+*.ipa
+
+# Runtime/generated certs and local secrets
+.env
+.env.*
+
+# Logs and temp files
+*.log
+.tmp/
+tmp/
+
+# Editor/OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# iOS generated files (produced by flutter pub get / pod install)
+Flutter/Generated.xcconfig
+Flutter/flutter_export_environment.sh
+xcuserdata/
+
+# OBS local state should not be committed.
+config/
+basic/
+profiles/
+scenes/
