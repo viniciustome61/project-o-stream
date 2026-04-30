@@ -26,6 +26,17 @@ tlpktdrop=1
 pkt_size=1316
 ```
 
+## Duplicate Receiver Detection
+
+Receiver offers are also used as split-receiver detection. Every receiver
+listens on UDP `7072` for offers from other Project O receivers. If an offer
+arrives from a different Tailscale IP, the receiver prints the peer name,
+peer address, and shutdown reason, then exits cleanly. The supervising
+`start-receiver.ps1` script then stops the associated ffmpeg process.
+
+This keeps the tailnet in a single-receiver state. If two receivers find each
+other, both exit and the owner should restart only the intended receiver.
+
 ## Mobile Sender
 
 The mobile app discovers the receiver automatically over Tailscale before it

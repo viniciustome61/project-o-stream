@@ -37,9 +37,13 @@ tmp/
 Thumbs.db
 
 # iOS generated files (produced by flutter pub get / pod install)
-Flutter/Generated.xcconfig
-Flutter/flutter_export_environment.sh
+ios/Flutter/Generated.xcconfig
+ios/Flutter/flutter_export_environment.sh
+ios/Flutter/ephemeral/
 xcuserdata/
+
+# Android generated files
+android/app/src/main/java/io/flutter/plugins/GeneratedPluginRegistrant.java
 
 # OBS local state should not be committed.
 config/

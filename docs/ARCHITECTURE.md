@@ -6,7 +6,7 @@ Low-latency, high-quality phone camera ingest into OBS over a private Tailscale 
 
 ## Components
 
-- `mobile/`: Flutter UI plus native Android/iOS camera and encoder bridges.
+- `lib/`, `android/`, `ios/`: Flutter UI plus native Android/iOS camera and encoder bridges.
 - `server/`: PC receiver that accepts SRT over the Tailscale interface and forwards local MPEG-TS to OBS.
 - `ops/`: scripts for launching OBS, checking the workstation, and starting the receiver.
 - `vendor/obs-portable/`: local OBS runtime used by this workstation.

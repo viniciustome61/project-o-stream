@@ -9,7 +9,7 @@
 ## Mobile Requirements
 
 - Android or iOS device logged into the same Tailscale tailnet.
-- Native app installed from `mobile/`.
+- Native app installed from the Flutter project root.
 
 ## Receiver
 
