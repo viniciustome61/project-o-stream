@@ -9,14 +9,12 @@ workflows:
         - project_o_keystore
     scripts:
       - name: Get dependencies
-        working_directory: mobile
         script: flutter pub get
       - name: Build AAB
-        working_directory: mobile
         script: flutter build appbundle --release
     artifacts:
-      - mobile/build/**/outputs/bundle/**/*.aab
-      - mobile/build/**/outputs/apk/**/*.apk
+      - build/**/outputs/bundle/**/*.aab
+      - build/**/outputs/apk/**/*.apk
     publishing:
       google_play:
         credentials: $GCLOUD_SERVICE_ACCOUNT_CREDENTIALS
@@ -29,13 +27,11 @@ workflows:
       flutter: stable
     scripts:
       - name: Get dependencies
-        working_directory: mobile
         script: flutter pub get
       - name: Build debug APK
-        working_directory: mobile
         script: flutter build apk --debug
     artifacts:
-      - mobile/build/**/outputs/apk/debug/*.apk
+      - build/**/outputs/apk/debug/*.apk
 
   ios-release:
     name: iOS (release)
@@ -50,18 +46,16 @@ workflows:
         bundle_identifier: com.projecto.stream
     scripts:
       - name: Get dependencies
-        working_directory: mobile
         script: flutter pub get
       - name: Install pods
-        working_directory: mobile/ios
+        working_directory: ios
         script: pod install
       - name: Build iOS
-        working_directory: mobile
         script: |
           flutter build ios --release \
             --export-options-plist=/Users/builder/export_options.plist
     artifacts:
-      - mobile/build/ios/iphoneos/*.app
+      - build/ios/iphoneos/*.app
       - "*.ipa"
     publishing:
       app_store_connect:

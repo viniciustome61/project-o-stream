@@ -80,28 +80,29 @@ Both peers detect each other and both exit. Only restart one.
 ## Repository Layout
 
 ```
-project-o-stream/
+project-o-stream/                ← Flutter project root (pubspec.yaml here)
+│
+├── lib/                         Dart source
+│   ├── main.dart                UI — camera preview, stream controls, settings
+│   ├── discovery.dart           Zero-input receiver discovery (UDP)
+│   ├── native_streamer.dart     Flutter ↔ native method/event channel bridge
+│   └── stream_config.dart       Stream profiles and SenderConfig model
+│
+├── android/                     Android native (Kotlin + StreamPack 3.1.2)
+│
+├── ios/                         iOS native (Swift + AVFoundation)
+│   ├── Runner.xcodeproj/
+│   ├── Runner.xcworkspace/
+│   ├── Flutter/                 xcconfig files (Generated.xcconfig excluded)
+│   ├── Podfile
+│   └── Runner/
+│       ├── AppDelegate.swift
+│       ├── CameraController.swift
+│       └── PreviewFactory.swift
 │
 ├── server/                      PC receiver scripts
 │   ├── start-receiver.ps1       Main entry point — launches ffmpeg + discovery
 │   └── discovery-server.ps1     Discovery daemon (UDP 7071 probes / 7072 offers)
-│
-├── mobile/                      Flutter mobile sender app
-│   ├── lib/
-│   │   ├── main.dart            UI — camera preview, stream controls, settings
-│   │   ├── discovery.dart       Zero-input receiver discovery (UDP)
-│   │   ├── native_streamer.dart Flutter ↔ native method/event channel bridge
-│   │   └── stream_config.dart   Stream profiles and SenderConfig model
-│   ├── android/                 Android native (Kotlin + StreamPack 3.1.2)
-│   └── ios/                     iOS native (Swift + AVFoundation)
-│       ├── Runner.xcodeproj/
-│       ├── Runner.xcworkspace/
-│       ├── Flutter/             xcconfig files (Generated.xcconfig excluded)
-│       ├── Podfile
-│       └── Runner/
-│           ├── AppDelegate.swift
-│           ├── CameraController.swift
-│           └── PreviewFactory.swift
 │
 ├── ops/                         Operator convenience scripts
 │   ├── start-receiver.ps1       Wrapper → server/start-receiver.ps1
@@ -120,6 +121,8 @@ project-o-stream/
 │   ├── PROTOCOL.md
 │   └── DEPLOYMENT.md
 │
+├── pubspec.yaml
+├── codemagic.yaml
 └── vendor/obs-portable/         OBS runtime — NOT in git (user provides)
 ```
 
@@ -293,7 +296,6 @@ Additional toggles per session:
 ### Android
 
 ```powershell
-cd mobile
 flutter pub get
 flutter run          # deploy to connected device
 # or
@@ -310,7 +312,6 @@ Target SDK: 35.
 iOS build requires **macOS with Xcode 14+**. The Xcode project is included in the repo — no `flutter create` needed.
 
 ```bash
-cd mobile
 flutter pub get                  # generates Flutter/Generated.xcconfig
 cd ios
 pod install                      # installs shared_preferences_foundation
