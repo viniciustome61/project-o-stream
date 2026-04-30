@@ -4,7 +4,7 @@ workflows:
     name: Android (release)
     max_build_duration: 30
     environment:
-      flutter: stable
+      flutter: 3.41.8
       android_signing:
         - project_o_keystore
     scripts:
@@ -24,7 +24,7 @@ workflows:
     name: Android (debug APK)
     max_build_duration: 20
     environment:
-      flutter: stable
+      flutter: 3.41.8
     scripts:
       - name: Get dependencies
         script: flutter pub get
@@ -38,7 +38,7 @@ workflows:
     max_build_duration: 60
     instance_type: mac_mini_m2
     environment:
-      flutter: stable
+      flutter: 3.41.8
       xcode: latest
       cocoapods: default
       ios_signing:
