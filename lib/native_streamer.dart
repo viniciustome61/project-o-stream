@@ -21,6 +21,10 @@ class NativeStreamer {
     await _methods.invokeMethod<void>('initialize');
   }
 
+  static Future<void> markFlutterRendered() async {
+    await _methods.invokeMethod<void>('flutterRendered');
+  }
+
   static Future<void> startPreview() async {
     await _methods.invokeMethod<void>('startPreview');
   }

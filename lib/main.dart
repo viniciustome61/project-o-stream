@@ -80,6 +80,11 @@ class _SenderScreenState extends State<SenderScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      unawaited(NativeStreamer.markFlutterRendered().catchError((error) {
+        _dbg('flutterRendered signal failed: $error');
+      }));
+    });
     _events = NativeStreamer.events.listen(_handleNativeEvent);
     _boot();
   }
@@ -194,9 +199,14 @@ class _SenderScreenState extends State<SenderScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.transparent,
+      backgroundColor: const Color(0xff101820),
       body: Stack(
         children: [
+          const Positioned.fill(
+            child: DecoratedBox(
+              decoration: BoxDecoration(color: Color(0xff101820)),
+            ),
+          ),
           const Positioned.fill(child: NativePreview()),
           Positioned.fill(
             child: DecoratedBox(

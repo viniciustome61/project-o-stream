@@ -25,13 +25,7 @@ class SceneDelegate: FlutterSceneDelegate {
             return
         }
 
-        print("[PO] FlutterViewController found - making Flutter transparent")
-        controller.isViewOpaque = false
-        controller.splashScreenView = nil
-        controller.view.isOpaque = false
-        controller.view.backgroundColor = .clear
-
-        appDelegate.registerNativeBridge(messenger: controller.binaryMessenger)
-        appDelegate.installPreviewBehindFlutter(in: window, below: controller.view)
+        print("[PO] FlutterViewController found - delegating native surface install")
+        appDelegate.installNativeSurface(in: window, controller: controller)
     }
 }

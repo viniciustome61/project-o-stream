@@ -9,12 +9,18 @@ class AppDelegate: FlutterAppDelegate, FlutterStreamHandler, FlutterImplicitEngi
     private var methodChannel: FlutterMethodChannel?
     private var eventChannel: FlutterEventChannel?
     private var nativeBridgeRegistered = false
+    private var bootOverlay: UIView?
+    private weak var bootOverlayLabel: UILabel?
 
     override func application(
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
     ) -> Bool {
-        return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+        GeneratedPluginRegistrant.register(with: self)
+
+        let launched = super.application(application, didFinishLaunchingWithOptions: launchOptions)
+        installNativeBridgeWhenFlutterViewIsReady()
+        return launched
     }
 
     func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
@@ -40,6 +46,43 @@ class AppDelegate: FlutterAppDelegate, FlutterStreamHandler, FlutterImplicitEngi
         eventChannel = events
     }
 
+    private func installNativeBridgeWhenFlutterViewIsReady() {
+        if installNativeBridgeOnCurrentRootController() {
+            return
+        }
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            if !self.installNativeBridgeOnCurrentRootController() {
+                print("[PO] Flutter root view controller was not available after launch")
+            }
+        }
+    }
+
+    @discardableResult
+    private func installNativeBridgeOnCurrentRootController() -> Bool {
+        guard let window = window,
+              let controller = window.rootViewController as? FlutterViewController else {
+            print("[PO] waiting for Flutter root view controller. window=\(String(describing: window)), root=\(String(describing: window?.rootViewController))")
+            return false
+        }
+
+        installNativeSurface(in: window, controller: controller)
+        return true
+    }
+
+    func installNativeSurface(in window: UIWindow, controller: FlutterViewController) {
+        print("[PO] FlutterViewController ready - installing native bridge, preview, and visible boot overlay")
+        controller.isViewOpaque = false
+        controller.splashScreenView = nil
+        controller.view.isOpaque = false
+        controller.view.backgroundColor = .clear
+
+        registerNativeBridge(messenger: controller.binaryMessenger)
+        installPreviewBehindFlutter(in: window, below: controller.view)
+        installBootOverlay(in: window, status: "native boot ok")
+    }
+
     func installPreviewBehindFlutter(in window: UIWindow, below flutterView: UIView) {
         let preview = camera.previewView
         let container = flutterView.superview ?? window
@@ -59,6 +102,46 @@ class AppDelegate: FlutterAppDelegate, FlutterStreamHandler, FlutterImplicitEngi
         print("[PO] native preview installed behind Flutter. frame=\(preview.frame)")
     }
 
+    private func installBootOverlay(in window: UIWindow, status: String) {
+        if let bootOverlay {
+            window.bringSubviewToFront(bootOverlay)
+            updateBootOverlay(status)
+            return
+        }
+
+        let overlay = UIView(frame: CGRect(x: 12, y: 54, width: window.bounds.width - 24, height: 54))
+        overlay.autoresizingMask = [.flexibleWidth, .flexibleBottomMargin]
+        overlay.backgroundColor = UIColor(red: 0.86, green: 0.09, blue: 0.13, alpha: 0.96)
+        overlay.layer.cornerRadius = 10
+        overlay.layer.borderColor = UIColor.white.withAlphaComponent(0.35).cgColor
+        overlay.layer.borderWidth = 1
+        overlay.isUserInteractionEnabled = false
+
+        let title = UILabel(frame: CGRect(x: 12, y: 7, width: overlay.bounds.width - 24, height: 18))
+        title.autoresizingMask = [.flexibleWidth]
+        title.text = "Project O Stream"
+        title.textColor = .white
+        title.font = .boldSystemFont(ofSize: 15)
+        overlay.addSubview(title)
+
+        let label = UILabel(frame: CGRect(x: 12, y: 28, width: overlay.bounds.width - 24, height: 17))
+        label.autoresizingMask = [.flexibleWidth]
+        label.textColor = UIColor.white.withAlphaComponent(0.88)
+        label.font = .monospacedSystemFont(ofSize: 11, weight: .medium)
+        overlay.addSubview(label)
+
+        window.addSubview(overlay)
+        window.bringSubviewToFront(overlay)
+        bootOverlay = overlay
+        bootOverlayLabel = label
+        updateBootOverlay(status)
+    }
+
+    private func updateBootOverlay(_ status: String) {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
+        bootOverlayLabel?.text = "\(status) | iOS \(UIDevice.current.systemVersion) | v\(version)"
+    }
+
     func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
         eventSink = events
         return nil
@@ -76,6 +159,10 @@ class AppDelegate: FlutterAppDelegate, FlutterStreamHandler, FlutterImplicitEngi
                 case "initialize":
                     try await camera.configure()
                     send(status: "Ready", live: false)
+                    result(nil)
+                case "flutterRendered":
+                    print("[PO] Flutter reported first rendered frame")
+                    updateBootOverlay("flutter frame rendered")
                     result(nil)
                 case "startPreview":
                     try await camera.startPreview()
