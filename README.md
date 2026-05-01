@@ -319,7 +319,7 @@ iOS build requires **macOS with Xcode 14+**. The Xcode project is included in th
 ```bash
 flutter pub get                  # generates Flutter/Generated.xcconfig
 cd ios
-pod install                      # installs shared_preferences_foundation
+pod install
 open Runner.xcworkspace          # open in Xcode — do NOT open .xcodeproj directly
 ```
 

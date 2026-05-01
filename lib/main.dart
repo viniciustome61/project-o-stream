@@ -2,7 +2,6 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 import 'discovery.dart';
 import 'native_streamer.dart';
@@ -74,9 +73,9 @@ class _SenderScreenState extends State<SenderScreen> {
   }
 
   Future<void> _load() async {
-    final prefs = await SharedPreferences.getInstance();
-    final host = prefs.getString('host');
-    final port = prefs.getInt('port');
+    final saved = await NativeStreamer.loadSavedEndpoint();
+    final host = saved['host'] as String?;
+    final port = saved['port'] as int?;
     if (host == null || host.isEmpty) {
       return;
     }
@@ -86,10 +85,9 @@ class _SenderScreenState extends State<SenderScreen> {
   }
 
   Future<void> _saveHost(String value, int port) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('host', value.trim());
-    await prefs.setInt('port', port);
-    setState(() => _config = _config.copyWith(host: value.trim(), port: port));
+    final host = value.trim();
+    await NativeStreamer.saveEndpoint(host: host, port: port);
+    setState(() => _config = _config.copyWith(host: host, port: port));
   }
 
   Future<void> _boot() async {

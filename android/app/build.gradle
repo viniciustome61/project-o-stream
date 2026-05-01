@@ -67,6 +67,21 @@ android {
     }
 }
 
+def staleFlutterRegistrant = layout.projectDirectory.file('src/main/java/io/flutter/plugins/GeneratedPluginRegistrant.java')
+tasks.register('deleteStaleFlutterRegistrant') {
+    doLast {
+        staleFlutterRegistrant.asFile.delete()
+    }
+}
+tasks.matching { it.name.startsWith('generate') && it.name.contains('PluginRegistrant') }.configureEach {
+    tasks.named('deleteStaleFlutterRegistrant').configure {
+        mustRunAfter it
+    }
+}
+tasks.matching { it.name.startsWith('compile') }.configureEach {
+    dependsOn tasks.named('deleteStaleFlutterRegistrant')
+}
+
 repositories {
     google()
     mavenCentral()

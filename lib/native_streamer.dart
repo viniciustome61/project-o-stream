@@ -28,6 +28,15 @@ class NativeStreamer {
     await _methods.invokeMethod<void>('stopPreview');
   }
 
+  static Future<Map<String, Object?>> loadSavedEndpoint() async {
+    final endpoint = await _methods.invokeMapMethod<String, Object?>('loadEndpoint');
+    return endpoint ?? const {};
+  }
+
+  static Future<void> saveEndpoint({required String host, required int port}) async {
+    await _methods.invokeMethod<void>('saveEndpoint', {'host': host, 'port': port});
+  }
+
   static Future<void> startStream(SenderConfig config) async {
     await _methods.invokeMethod<void>('startStream', config.toJson());
   }

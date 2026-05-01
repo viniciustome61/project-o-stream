@@ -57,6 +57,26 @@ class AppDelegate: FlutterAppDelegate, FlutterStreamHandler {
                     camera.stop()
                     send(status: "Preview stopped", live: false)
                     result(nil)
+                case "loadEndpoint":
+                    let defaults = UserDefaults.standard
+                    var endpoint: [String: Any] = [:]
+                    if let host = defaults.string(forKey: "project_o_stream.host") {
+                        endpoint["host"] = host
+                    }
+                    if defaults.object(forKey: "project_o_stream.port") != nil {
+                        endpoint["port"] = defaults.integer(forKey: "project_o_stream.port")
+                    }
+                    result(endpoint)
+                case "saveEndpoint":
+                    guard let args = call.arguments as? [String: Any],
+                          let host = args["host"] as? String,
+                          let port = args["port"] as? Int else {
+                        throw StreamError.invalidArguments
+                    }
+                    let defaults = UserDefaults.standard
+                    defaults.set(host.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "project_o_stream.host")
+                    defaults.set(port, forKey: "project_o_stream.port")
+                    result(nil)
                 case "startStream":
                     guard let args = call.arguments as? [String: Any] else {
                         throw StreamError.invalidArguments

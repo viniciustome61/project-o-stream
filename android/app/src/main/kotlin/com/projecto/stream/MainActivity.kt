@@ -45,8 +45,7 @@ class MainActivity : FlutterActivity() {
             .setMethodCallHandler { call, result ->
                 scope.launch {
                     try {
-                        handleCall(call)
-                        result.success(null)
+                        result.success(handleCall(call))
                     } catch (error: Throwable) {
                         result.error("native_error", error.message, null)
                     }
@@ -65,19 +64,22 @@ class MainActivity : FlutterActivity() {
             })
     }
 
-    private suspend fun handleCall(call: MethodCall) {
-        when (call.method) {
+    private suspend fun handleCall(call: MethodCall): Any? {
+        return when (call.method) {
             "initialize" -> {
                 ensurePermissions()
                 bridge.initialize()
+                null
             }
-            "startPreview" -> bridge.startPreview()
-            "stopPreview" -> bridge.stopPreview()
-            "startStream" -> bridge.startStream(call.arguments as Map<*, *>)
-            "stopStream" -> bridge.stopStream()
-            "switchCamera" -> bridge.switchCamera()
-            "setTorch" -> bridge.setTorch((call.arguments as Map<*, *>)["enabled"] == true)
-            "setZoom" -> bridge.setZoom(((call.arguments as Map<*, *>)["value"] as Number).toFloat())
+            "startPreview" -> bridge.startPreview().let { null }
+            "stopPreview" -> bridge.stopPreview().let { null }
+            "loadEndpoint" -> bridge.loadEndpoint()
+            "saveEndpoint" -> bridge.saveEndpoint(call.arguments as Map<*, *>).let { null }
+            "startStream" -> bridge.startStream(call.arguments as Map<*, *>).let { null }
+            "stopStream" -> bridge.stopStream().let { null }
+            "switchCamera" -> bridge.switchCamera().let { null }
+            "setTorch" -> bridge.setTorch((call.arguments as Map<*, *>)["enabled"] == true).let { null }
+            "setZoom" -> bridge.setZoom(((call.arguments as Map<*, *>)["value"] as Number).toFloat()).let { null }
             else -> error("Unknown method ${call.method}")
         }
     }
@@ -125,6 +127,24 @@ class StreamBridge(
 
     suspend fun stopPreview() {
         emitStatus("Preview stopped", live)
+    }
+
+    fun loadEndpoint(): Map<String, Any?> {
+        val preferences = activity.getSharedPreferences("project_o_stream", android.content.Context.MODE_PRIVATE)
+        return mapOf(
+            "host" to preferences.getString("host", null),
+            "port" to if (preferences.contains("port")) preferences.getInt("port", 7070) else null
+        )
+    }
+
+    fun saveEndpoint(args: Map<*, *>) {
+        val host = args["host"]?.toString()?.trim().orEmpty()
+        val port = (args["port"] as Number).toInt()
+        activity.getSharedPreferences("project_o_stream", android.content.Context.MODE_PRIVATE)
+            .edit()
+            .putString("host", host)
+            .putInt("port", port)
+            .apply()
     }
 
     suspend fun startStream(args: Map<*, *>) {
