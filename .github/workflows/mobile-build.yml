@@ -44,14 +44,16 @@ jobs:
         run: flutter analyze
 
       - name: Build debug AAB
-        run: ./gradlew -p android bundleDebug
+        working-directory: android
+        run: ./gradlew bundleDebug
 
       - name: Build debug APK
-        run: ./gradlew -p android assembleDebug
+        working-directory: android
+        run: ./gradlew assembleDebug
 
       - name: List Android outputs
         if: always()
-        run: find build android/app/build -type f \( -name "*.aab" -o -name "*.apk" \) -print
+        run: find build android/app/build -type f \( -name "*.aab" -o -name "*.apk" \) -print 2>/dev/null || true
 
       - name: Upload Android artifacts
         uses: actions/upload-artifact@v4
@@ -84,12 +86,12 @@ jobs:
         working-directory: ios
         run: pod install
 
-      - name: Build iOS without code signing
-        run: flutter build ios --release --no-codesign
+      - name: Build iOS simulator app
+        run: flutter build ios --simulator --debug
 
       - name: Upload iOS artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ios-release-unsigned
+          name: ios-simulator-debug
           if-no-files-found: error
-          path: build/ios/iphoneos/Runner.app
+          path: build/ios/iphonesimulator/Runner.app
