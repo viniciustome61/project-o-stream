@@ -68,6 +68,11 @@ android {
 }
 
 def staleFlutterRegistrant = layout.projectDirectory.file('src/main/java/io/flutter/plugins/GeneratedPluginRegistrant.java')
+def repoFlutterRoot = file('../..')
+def mobileFlutterRoot = file('../../mobile')
+def rootPackageConfig = file('../../.dart_tool/package_config.json')
+def mobilePackageConfig = file('../../mobile/.dart_tool/package_config.json')
+
 tasks.register('deleteStaleFlutterRegistrant') {
     doLast {
         staleFlutterRegistrant.asFile.delete()
@@ -81,6 +86,27 @@ tasks.matching { it.name.startsWith('generate') && it.name.contains('PluginRegis
 tasks.matching { it.name.startsWith('compile') }.configureEach {
     dependsOn tasks.named('deleteStaleFlutterRegistrant')
 }
+tasks.register('mirrorFlutterBuildOutputs') {
+    doLast {
+        def rootOutputs = new File(repoFlutterRoot, 'build/app/outputs')
+        def mobileOutputs = new File(mobileFlutterRoot, 'build/app/outputs')
+        if (rootOutputs.exists()) {
+            copy {
+                from rootOutputs
+                into mobileOutputs
+            }
+        }
+        if (mobileOutputs.exists()) {
+            copy {
+                from mobileOutputs
+                into rootOutputs
+            }
+        }
+    }
+}
+tasks.matching { it.name.startsWith('bundle') || it.name.startsWith('assemble') }.configureEach {
+    finalizedBy tasks.named('mirrorFlutterBuildOutputs')
+}
 
 repositories {
     google()
@@ -88,7 +114,7 @@ repositories {
 }
 
 flutter {
-    source '../..'
+    source rootPackageConfig.exists() || !mobilePackageConfig.exists() ? '../..' : '../../mobile'
 }
 
 dependencies {
