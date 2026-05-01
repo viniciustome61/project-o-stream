@@ -106,12 +106,12 @@ class AppDelegate: FlutterAppDelegate, FlutterStreamHandler {
                     result(nil)
                 case "setTorch":
                     let enabled = (call.arguments as? [String: Any])?["enabled"] as? Bool ?? false
-                    try camera.setTorch(enabled)
+                    try await camera.setTorch(enabled)
                     send(status: enabled ? "Torch on" : "Torch off", live: false)
                     result(nil)
                 case "setZoom":
                     let value = (call.arguments as? [String: Any])?["value"] as? Double ?? 1
-                    try camera.setZoom(CGFloat(value))
+                    try await camera.setZoom(CGFloat(value))
                     send(status: String(format: "Zoom %.1fx", value), live: false)
                     result(nil)
                 case "setKeepScreenOn":
