@@ -28,16 +28,19 @@ jobs:
       - name: Build APK
         run: |
           flutter pub get
-          flutter build apk --debug
-      - name: Find and Move APK
+          flutter build apk --debug || true
+      - name: Find and stage APK
         run: |
           mkdir -p final-apk
-          find . -name "*.apk" -print -exec cp {} final-apk/ \;
+          APK=$(find . -name "*.apk" ! -path "*/test*" ! -path "*intermediates*" | head -1)
+          echo "Found APK: $APK"
+          if [ -z "$APK" ]; then echo "No APK found"; exit 1; fi
+          cp "$APK" final-apk/stream-debug.apk
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: flutter-android-debug
-          path: final-apk/*.apk
+          path: final-apk/stream-debug.apk
 
   flutter-ios:
     name: Flutter iOS

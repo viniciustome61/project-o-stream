@@ -1,6 +1,5 @@
 import AVFoundation
 import UIKit
-import HaishinKit
 
 @MainActor
 final class CameraController: NSObject {
