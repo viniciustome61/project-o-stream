@@ -10,5 +10,10 @@ import Flutter
         let window = UIWindow(windowScene: windowScene)
         self.window = window
         window.makeKeyAndVisible()
+        
+        if let rootViewController = window.rootViewController as? FlutterViewController,
+           let appDelegate = UIApplication.shared.delegate as? AppDelegate {
+            appDelegate.installNativeSurface(in: window, controller: rootViewController)
+        }
     }
 }
