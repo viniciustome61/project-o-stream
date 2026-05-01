@@ -1,7 +1,13 @@
 {
-  "name": "desktop",
-  "version": "0.1.0",
-  "description": "",
+  "name": "project-o-stream-desktop",
+  "version": "3.0.0",
+  "description": "Desktop-only Tauri + Svelte controller for Project O Stream. Mobile work stays on main.",
+  "projectO": {
+    "platform": "desktop",
+    "branch": "desktop/tauri-svelte",
+    "mobileBranch": "main",
+    "shell": "Tauri + Svelte"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite dev",

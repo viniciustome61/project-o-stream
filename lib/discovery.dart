@@ -7,15 +7,20 @@ class DiscoveredReceiver {
     required this.host,
     required this.hostname,
     required this.srtPort,
+    required this.obsUdpPort,
+    required this.transport,
     required this.roundTripMs,
   });
 
   final String host;
   final String hostname;
   final int srtPort;
+  final int obsUdpPort;
+  final String transport;
   final int roundTripMs;
 
   String get label => '$hostname  $host:$srtPort  ${roundTripMs}ms';
+  String get details => '${transport.toUpperCase()} -> OBS UDP $obsUdpPort';
 }
 
 class ReceiverDiscovery {
@@ -36,7 +41,8 @@ class ReceiverDiscovery {
 
     Future<void> finishFrom(Datagram datagram) async {
       try {
-        final payload = jsonDecode(utf8.decode(datagram.data)) as Map<String, dynamic>;
+        final payload =
+            jsonDecode(utf8.decode(datagram.data)) as Map<String, dynamic>;
         if (payload['service'] != 'project-o-stream') return;
         final host = (payload['host'] as String?) ?? datagram.address.address;
         if (!seen.add(host) || completer.isCompleted) return;
@@ -46,6 +52,8 @@ class ReceiverDiscovery {
             host: host,
             hostname: (payload['hostname'] as String?) ?? host,
             srtPort: (payload['srtPort'] as num?)?.toInt() ?? 7070,
+            obsUdpPort: (payload['obsUdpPort'] as num?)?.toInt() ?? 15000,
+            transport: (payload['transport'] as String?) ?? 'srt',
             roundTripMs: elapsed,
           ),
         );
@@ -65,7 +73,8 @@ class ReceiverDiscovery {
       );
     }
 
-    final probeSocket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
+    final probeSocket =
+        await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
     probeSocket.broadcastEnabled = true;
     sockets.add(probeSocket);
     attachReader(probeSocket);
@@ -93,10 +102,12 @@ class ReceiverDiscovery {
       }
     }
 
-    pulseTimer = Timer.periodic(const Duration(milliseconds: 350), (_) => sendPulse());
+    pulseTimer =
+        Timer.periodic(const Duration(milliseconds: 350), (_) => sendPulse());
     sendPulse();
 
-    final result = await completer.future.timeout(timeout, onTimeout: () => null);
+    final result =
+        await completer.future.timeout(timeout, onTimeout: () => null);
     pulseTimer.cancel();
     for (final subscription in subscriptions) {
       await subscription.cancel();

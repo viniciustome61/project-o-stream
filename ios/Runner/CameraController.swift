@@ -1,14 +1,14 @@
 import AVFoundation
 import UIKit
+import HaishinKit
 
 @MainActor
-final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAudioDataOutputSampleBufferDelegate {
+final class CameraController: NSObject {
     let previewView = PreviewHostView()
 
-    private let session = AVCaptureSession()
-    private let queue = DispatchQueue(label: "project-o-camera")
-    private var videoInput: AVCaptureDeviceInput?
-    private var audioInput: AVCaptureDeviceInput?
+    private let connection = SRTConnection()
+    private lazy var stream: SRTStream = SRTStream(connection: connection)
+    private lazy var hkView = MTHKView(frame: .zero)
     private var streaming = false
 
     func configure() async throws {
@@ -20,88 +20,81 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
             throw NSError(domain: "ProjectOStream", code: 4,
                           userInfo: [NSLocalizedDescriptionKey: "Microphone permission denied"])
         }
-        session.beginConfiguration()
-        session.sessionPreset = .hd4K3840x2160
-        try configureVideo(position: .back)
-        try configureAudio()
-        let videoOutput = AVCaptureVideoDataOutput()
-        videoOutput.alwaysDiscardsLateVideoFrames = true
-        videoOutput.setSampleBufferDelegate(self, queue: queue)
-        if session.canAddOutput(videoOutput) { session.addOutput(videoOutput) }
-        let audioOutput = AVCaptureAudioDataOutput()
-        audioOutput.setSampleBufferDelegate(self, queue: queue)
-        if session.canAddOutput(audioOutput) { session.addOutput(audioOutput) }
-        session.commitConfiguration()
-        previewView.layer.session = session
-        previewView.layer.videoGravity = .resizeAspect
+
+        stream.attachCamera(AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back))
+        stream.attachAudio(AVCaptureDevice.default(for: .audio))
+        
+        // Match quality profiles from Flutter
+        stream.videoSettings.videoSize = .init(width: 3840, height: 2160)
+        stream.videoSettings.bitrate = 12 * 1000 * 1000 // 12Mbps default
+        stream.videoSettings.profileLevel = kVTProfileLevel_H264_High_AutoLevel as String
+        
+        hkView.videoGravity = .resizeAspect
+        hkView.attachStream(stream)
+        
+        previewView.addSubview(hkView)
+        hkView.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            hkView.topAnchor.constraint(equalTo: previewView.topAnchor),
+            hkView.bottomAnchor.constraint(equalTo: previewView.bottomAnchor),
+            hkView.leadingAnchor.constraint(equalTo: previewView.leadingAnchor),
+            hkView.trailingAnchor.constraint(equalTo: previewView.trailingAnchor)
+        ])
     }
 
     func startPreview() async throws {
-        if !session.isRunning {
-            queue.async { self.session.startRunning() }
-        }
+        // HaishinKit starts capture when attached
     }
 
     func startStream(config: [String: Any]) async throws {
+        let host = config["host"] as? String ?? ""
+        let port = config["port"] as? Int ?? 7070
+        let latencyMs = config["latencyMs"] as? Int ?? 80
+        
+        let profile = config["profile"] as? [String: Any]
+        let width = profile?["width"] as? Int ?? 3840
+        let height = profile?["height"] as? Int ?? 2160
+        let bitrate = profile?["bitrate"] as? Int ?? 12000000
+        
+        stream.videoSettings.videoSize = .init(width: width, height: height)
+        stream.videoSettings.bitrate = bitrate
+        
+        let url = "srt://\(host):\(port)?mode=caller&latency=\(latencyMs)"
+        connection.connect(url)
+        stream.publish()
         streaming = true
-        throw StreamError.srtTransportUnavailable
     }
 
     func stopStream() {
+        stream.close()
+        connection.close()
         streaming = false
     }
 
     func stop() {
-        streaming = false
-        if session.isRunning {
-            queue.async { self.session.stopRunning() }
-        }
+        stopStream()
     }
 
     func switchCamera() async throws {
-        let next: AVCaptureDevice.Position = videoInput?.device.position == .back ? .front : .back
-        session.beginConfiguration()
-        if let videoInput { session.removeInput(videoInput) }
-        try configureVideo(position: next)
-        session.commitConfiguration()
+        let position: AVCaptureDevice.Position = stream.videoSettings.device?.position == .back ? .front : .back
+        stream.attachCamera(AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position))
     }
 
     func setTorch(_ enabled: Bool) throws {
-        guard let device = videoInput?.device, device.hasTorch else { return }
+        guard let device = stream.videoSettings.device, device.hasTorch else { return }
         try device.lockForConfiguration()
         device.torchMode = enabled ? .on : .off
         device.unlockForConfiguration()
     }
 
     func setZoom(_ value: CGFloat) throws {
-        guard let device = videoInput?.device else { return }
+        guard let device = stream.videoSettings.device else { return }
         try device.lockForConfiguration()
         device.videoZoomFactor = min(max(value, 1), device.activeFormat.videoMaxZoomFactor)
         device.unlockForConfiguration()
     }
-
-    private func configureVideo(position: AVCaptureDevice.Position) throws {
-        guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position) else {
-            throw NSError(domain: "ProjectOStream", code: 1, userInfo: [NSLocalizedDescriptionKey: "Camera not found"])
-        }
-        let input = try AVCaptureDeviceInput(device: device)
-        if session.canAddInput(input) {
-            session.addInput(input)
-            videoInput = input
-        }
-    }
-
-    private func configureAudio() throws {
-        guard let device = AVCaptureDevice.default(for: .audio) else { return }
-        let input = try AVCaptureDeviceInput(device: device)
-        if session.canAddInput(input) {
-            session.addInput(input)
-            audioInput = input
-        }
-    }
 }
 
 final class PreviewHostView: UIView {
-    override class var layerClass: AnyClass { AVCaptureVideoPreviewLayer.self }
-    override var layer: AVCaptureVideoPreviewLayer { super.layer as! AVCaptureVideoPreviewLayer }
+    // Container for HaishinKit view
 }

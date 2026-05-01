@@ -7,7 +7,8 @@ import 'stream_config.dart';
 class NativeStreamer {
   NativeStreamer._();
 
-  static const MethodChannel _methods = MethodChannel('project_o_stream/native');
+  static const MethodChannel _methods =
+      MethodChannel('project_o_stream/native');
   static const EventChannel _events = EventChannel('project_o_stream/events');
 
   static Stream<Map<String, Object?>> get events {
@@ -29,12 +30,21 @@ class NativeStreamer {
   }
 
   static Future<Map<String, Object?>> loadSavedEndpoint() async {
-    final endpoint = await _methods.invokeMapMethod<String, Object?>('loadEndpoint');
+    final endpoint =
+        await _methods.invokeMapMethod<String, Object?>('loadEndpoint');
     return endpoint ?? const {};
   }
 
-  static Future<void> saveEndpoint({required String host, required int port}) async {
-    await _methods.invokeMethod<void>('saveEndpoint', {'host': host, 'port': port});
+  static Future<void> saveEndpoint(
+      {required String host, required int port}) async {
+    await _methods
+        .invokeMethod<void>('saveEndpoint', {'host': host, 'port': port});
+  }
+
+  static Future<Map<String, Object?>> getCapabilities() async {
+    final capabilities =
+        await _methods.invokeMapMethod<String, Object?>('getCapabilities');
+    return capabilities ?? const {};
   }
 
   static Future<void> startStream(SenderConfig config) async {
@@ -55,5 +65,9 @@ class NativeStreamer {
 
   static Future<void> setZoom(double value) async {
     await _methods.invokeMethod<void>('setZoom', {'value': value});
+  }
+
+  static Future<void> setKeepScreenOn(bool enabled) async {
+    await _methods.invokeMethod<void>('setKeepScreenOn', {'enabled': enabled});
   }
 }

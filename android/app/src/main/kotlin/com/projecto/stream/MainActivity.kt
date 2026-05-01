@@ -3,9 +3,11 @@ package com.projecto.stream
 import android.Manifest
 import android.content.pm.PackageManager
 import android.media.AudioFormat
+import android.os.Build
 import android.util.Size
 import android.view.Surface
 import android.view.View
+import android.view.WindowManager
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import io.flutter.embedding.android.FlutterActivity
@@ -75,11 +77,13 @@ class MainActivity : FlutterActivity() {
             "stopPreview" -> bridge.stopPreview().let { null }
             "loadEndpoint" -> bridge.loadEndpoint()
             "saveEndpoint" -> bridge.saveEndpoint(call.arguments as Map<*, *>).let { null }
+            "getCapabilities" -> bridge.getCapabilities()
             "startStream" -> bridge.startStream(call.arguments as Map<*, *>).let { null }
             "stopStream" -> bridge.stopStream().let { null }
             "switchCamera" -> bridge.switchCamera().let { null }
             "setTorch" -> bridge.setTorch((call.arguments as Map<*, *>)["enabled"] == true).let { null }
             "setZoom" -> bridge.setZoom(((call.arguments as Map<*, *>)["value"] as Number).toFloat()).let { null }
+            "setKeepScreenOn" -> bridge.setKeepScreenOn((call.arguments as Map<*, *>)["enabled"] == true).let { null }
             else -> error("Unknown method ${call.method}")
         }
     }
@@ -147,6 +151,20 @@ class StreamBridge(
             .apply()
     }
 
+    fun getCapabilities(): Map<String, Any> {
+        return mapOf(
+            "platform" to "android",
+            "preview" to true,
+            "srt" to true,
+            "hevc" to true,
+            "torch" to true,
+            "zoom" to true,
+            "transportStatus" to "SRT sender available via StreamPack",
+            "device" to "${Build.MANUFACTURER} ${Build.MODEL}",
+            "os" to "Android ${Build.VERSION.RELEASE}"
+        )
+    }
+
     suspend fun startStream(args: Map<*, *>) {
         val activeStreamer = requireStreamer()
         val profile = args["profile"] as Map<*, *>
@@ -205,6 +223,15 @@ class StreamBridge(
 
     suspend fun setZoom(value: Float) {
         emitStatus("Zoom ${"%.1f".format(value)}x", live)
+    }
+
+    fun setKeepScreenOn(enabled: Boolean) {
+        if (enabled) {
+            activity.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        } else {
+            activity.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+        emitStatus(if (enabled) "Screen awake lock on" else "Screen awake lock off", live)
     }
 
     private suspend fun requireStreamer(): SingleStreamer {

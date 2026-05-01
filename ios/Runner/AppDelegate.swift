@@ -77,6 +77,18 @@ class AppDelegate: FlutterAppDelegate, FlutterStreamHandler {
                     defaults.set(host.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "project_o_stream.host")
                     defaults.set(port, forKey: "project_o_stream.port")
                     result(nil)
+                case "getCapabilities":
+                    result([
+                        "platform": "ios",
+                        "preview": true,
+                        "srt": true,
+                        "hevc": true,
+                        "torch": true,
+                        "zoom": true,
+                        "transportStatus": "SRT sender available via HaishinKit",
+                        "device": UIDevice.current.model,
+                        "os": "\(UIDevice.current.systemName) \(UIDevice.current.systemVersion)"
+                    ])
                 case "startStream":
                     guard let args = call.arguments as? [String: Any] else {
                         throw StreamError.invalidArguments
@@ -101,6 +113,11 @@ class AppDelegate: FlutterAppDelegate, FlutterStreamHandler {
                     let value = (call.arguments as? [String: Any])?["value"] as? Double ?? 1
                     try camera.setZoom(CGFloat(value))
                     send(status: String(format: "Zoom %.1fx", value), live: false)
+                    result(nil)
+                case "setKeepScreenOn":
+                    let enabled = (call.arguments as? [String: Any])?["enabled"] as? Bool ?? false
+                    UIApplication.shared.isIdleTimerDisabled = enabled
+                    send(status: enabled ? "Screen awake lock on" : "Screen awake lock off", live: false)
                     result(nil)
                 default:
                     result(FlutterMethodNotImplemented)

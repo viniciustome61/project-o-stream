@@ -10,7 +10,14 @@ $ErrorActionPreference = "Stop"
 $tailscale = Get-Command tailscale -ErrorAction SilentlyContinue
 $tailscaleIp = $null
 if ($tailscale) {
-    $tailscaleIp = (& tailscale ip -4 2>$null | Select-Object -First 1)
+    try {
+        $tailscaleOutput = & tailscale ip -4 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            $tailscaleIp = ($tailscaleOutput | Select-Object -First 1)
+        }
+    } catch {
+        $tailscaleIp = $null
+    }
 }
 
 $udp = [System.Net.Sockets.UdpClient]::new($DiscoveryPort)
@@ -52,6 +59,12 @@ function New-DiscoveryPayload {
         clientDiscoveryPort = $ClientDiscoveryPort
         obsUdpPort = $ObsUdpPort
         transport = "srt"
+        capabilities = @{
+            duplicateReceiverDetection = $true
+            tailscalePreferred = [bool]$tailscaleIp
+            obsUdpForward = $true
+            protocolVersion = "3.0"
+        }
     } | ConvertTo-Json -Compress
 }
 

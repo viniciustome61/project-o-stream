@@ -1,5 +1,10 @@
 $ErrorActionPreference = "Continue"
 
+Write-Host "== Project O Stream 3.0 Doctor =="
+Write-Host "Mobile branch: main"
+Write-Host "Desktop branch: desktop/tauri-svelte"
+Write-Host ""
+
 Write-Host "== Tools =="
 foreach ($tool in @("ffmpeg", "ffprobe", "tailscale", "flutter", "dart")) {
     $cmd = Get-Command $tool -ErrorAction SilentlyContinue
@@ -27,3 +32,10 @@ Get-NetTCPConnection -LocalPort 7070,7071,15000 -State Listen -ErrorAction Silen
 Write-Host "UDP:"
 Get-NetUDPEndpoint -LocalPort 7070,7071,7072,15000 -ErrorAction SilentlyContinue |
     Select-Object LocalAddress,LocalPort,OwningProcess
+
+Write-Host ""
+Write-Host "== Receiver Health =="
+$receiver = Join-Path (Split-Path -Parent $PSScriptRoot) "server\start-receiver.ps1"
+if (Test-Path $receiver) {
+    powershell -NoProfile -ExecutionPolicy Bypass -File $receiver -Health
+}

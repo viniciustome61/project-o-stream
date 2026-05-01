@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'app_metadata.dart';
 import 'discovery.dart';
 import 'native_streamer.dart';
 import 'stream_config.dart';
@@ -48,6 +49,9 @@ class _SenderScreenState extends State<SenderScreen> {
     microphone: true,
     lens: 'back',
     latencyMs: 80,
+    autoReconnect: true,
+    keepScreenOn: true,
+    showSafeAreaGrid: false,
   );
 
   StreamSubscription<Map<String, Object?>>? _events;
@@ -57,6 +61,7 @@ class _SenderScreenState extends State<SenderScreen> {
   double _zoom = 1;
   String _status = 'Starting camera';
   String _stats = '';
+  Map<String, Object?> _capabilities = const {};
   DiscoveredReceiver? _receiver;
 
   @override
@@ -94,6 +99,8 @@ class _SenderScreenState extends State<SenderScreen> {
     try {
       await _load();
       await NativeStreamer.initialize();
+      _capabilities = await NativeStreamer.getCapabilities();
+      await NativeStreamer.setKeepScreenOn(_config.keepScreenOn);
       await NativeStreamer.startPreview();
       await _discover();
       setState(() {
@@ -151,6 +158,13 @@ class _SenderScreenState extends State<SenderScreen> {
       }
     } catch (error) {
       setState(() => _status = 'Stream error: $error');
+      if (_config.autoReconnect && _receiver != null) {
+        unawaited(Future<void>.delayed(const Duration(seconds: 2), () async {
+          if (!_live && mounted) {
+            await _discover();
+          }
+        }));
+      }
     } finally {
       setState(() => _busy = false);
     }
@@ -180,14 +194,23 @@ class _SenderScreenState extends State<SenderScreen> {
           SafeArea(
             child: Column(
               children: [
-                _TopBar(status: _status, live: _live, stats: _stats),
+                _TopBar(
+                    status: _status,
+                    live: _live,
+                    stats: _stats,
+                    capabilities: _capabilities),
                 const Spacer(),
+                if (_config.showSafeAreaGrid)
+                  const Expanded(child: _CompositionGrid()),
                 _SettingsPanel(
                   config: _config,
                   receiver: _receiver,
+                  capabilities: _capabilities,
                   onDiscover: _discover,
                   onProfileChanged: (profile) => setState(() {
-                    _config = _config.copyWith(profile: profile);
+                    _config = _config.copyWith(
+                        profile: profile,
+                        latencyMs: profile.recommendedLatencyMs);
                   }),
                   onCodecChanged: (value) => setState(() {
                     _config = _config.copyWith(useHevc: value);
@@ -197,6 +220,17 @@ class _SenderScreenState extends State<SenderScreen> {
                   }),
                   onLatencyChanged: (value) => setState(() {
                     _config = _config.copyWith(latencyMs: value.round());
+                  }),
+                  onAutoReconnectChanged: (value) => setState(() {
+                    _config = _config.copyWith(autoReconnect: value);
+                  }),
+                  onKeepScreenOnChanged: (value) async {
+                    await NativeStreamer.setKeepScreenOn(value);
+                    setState(
+                        () => _config = _config.copyWith(keepScreenOn: value));
+                  },
+                  onGridChanged: (value) => setState(() {
+                    _config = _config.copyWith(showSafeAreaGrid: value);
                   }),
                 ),
                 Padding(
@@ -225,7 +259,8 @@ class _SenderScreenState extends State<SenderScreen> {
                           child: _busy
                               ? const Padding(
                                   padding: EdgeInsets.all(24),
-                                  child: CircularProgressIndicator(strokeWidth: 3),
+                                  child:
+                                      CircularProgressIndicator(strokeWidth: 3),
                                 )
                               : null,
                         ),
@@ -280,34 +315,63 @@ class NativePreview extends StatelessWidget {
 }
 
 class _TopBar extends StatelessWidget {
-  const _TopBar({required this.status, required this.live, required this.stats});
+  const _TopBar({
+    required this.status,
+    required this.live,
+    required this.stats,
+    required this.capabilities,
+  });
 
   final String status;
   final bool live;
   final String stats;
+  final Map<String, Object?> capabilities;
 
   @override
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.all(16),
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Container(
-            width: 10,
-            height: 10,
-            decoration: BoxDecoration(
-              color: live ? Colors.red : Colors.green,
-              shape: BoxShape.circle,
-            ),
+          Row(
+            children: [
+              Container(
+                width: 10,
+                height: 10,
+                decoration: BoxDecoration(
+                  color: live ? Colors.red : Colors.green,
+                  shape: BoxShape.circle,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  stats.isEmpty ? status : '$status  $stats',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontWeight: FontWeight.w700),
+                ),
+              ),
+              Text(AppMetadata.version,
+                  style: Theme.of(context).textTheme.labelMedium),
+            ],
           ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Text(
-              stats.isEmpty ? status : '$status  $stats',
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontWeight: FontWeight.w700),
-            ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 6,
+            children: [
+              _CapabilityChip(
+                  label: 'SRT Transport', enabled: capabilities['srt'] == true),
+              _CapabilityChip(
+                  label: 'HEVC', enabled: capabilities['hevc'] == true),
+              _CapabilityChip(
+                  label: 'Torch', enabled: capabilities['torch'] == true),
+              _CapabilityChip(
+                  label: 'Native Preview',
+                  enabled: capabilities['preview'] == true),
+            ],
           ),
         ],
       ),
@@ -315,24 +379,93 @@ class _TopBar extends StatelessWidget {
   }
 }
 
+class _CapabilityChip extends StatelessWidget {
+  const _CapabilityChip({required this.label, required this.enabled});
+
+  final String label;
+  final bool enabled;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+      decoration: BoxDecoration(
+        color: (enabled ? Colors.green : Colors.white)
+            .withValues(alpha: enabled ? .2 : .1),
+        borderRadius: BorderRadius.circular(999),
+        border:
+            Border.all(color: enabled ? Colors.greenAccent : Colors.white24),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          fontSize: 11,
+          color: enabled ? Colors.greenAccent : Colors.white54,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+    );
+  }
+}
+
+class _CompositionGrid extends StatelessWidget {
+  const _CompositionGrid();
+
+  @override
+  Widget build(BuildContext context) {
+    return IgnorePointer(
+      child: CustomPaint(
+        painter: _GridPainter(),
+        child: const SizedBox.expand(),
+      ),
+    );
+  }
+}
+
+class _GridPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = Colors.white.withValues(alpha: .22)
+      ..strokeWidth = 1;
+    for (final x in [size.width / 3, size.width * 2 / 3]) {
+      canvas.drawLine(Offset(x, 0), Offset(x, size.height), paint);
+    }
+    for (final y in [size.height / 3, size.height * 2 / 3]) {
+      canvas.drawLine(Offset(0, y), Offset(size.width, y), paint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}
+
 class _SettingsPanel extends StatelessWidget {
   const _SettingsPanel({
     required this.config,
     required this.receiver,
+    required this.capabilities,
     required this.onDiscover,
     required this.onProfileChanged,
     required this.onCodecChanged,
     required this.onMicrophoneChanged,
     required this.onLatencyChanged,
+    required this.onAutoReconnectChanged,
+    required this.onKeepScreenOnChanged,
+    required this.onGridChanged,
   });
 
   final SenderConfig config;
   final DiscoveredReceiver? receiver;
+  final Map<String, Object?> capabilities;
   final Future<void> Function() onDiscover;
   final ValueChanged<StreamProfile> onProfileChanged;
   final ValueChanged<bool> onCodecChanged;
   final ValueChanged<bool> onMicrophoneChanged;
   final ValueChanged<double> onLatencyChanged;
+  final ValueChanged<bool> onAutoReconnectChanged;
+  final ValueChanged<bool> onKeepScreenOnChanged;
+  final ValueChanged<bool> onGridChanged;
 
   @override
   Widget build(BuildContext context) {
@@ -351,7 +484,9 @@ class _SettingsPanel extends StatelessWidget {
             children: [
               Expanded(
                 child: Text(
-                  receiver == null ? 'Receiver: searching' : 'Receiver: ${receiver!.label}',
+                  receiver == null
+                      ? 'Receiver: searching'
+                      : 'Receiver: ${receiver!.label}',
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                 ),
@@ -363,14 +498,31 @@ class _SettingsPanel extends StatelessWidget {
               ),
             ],
           ),
+          if (receiver != null)
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                receiver!.details,
+                style: Theme.of(context)
+                    .textTheme
+                    .labelSmall
+                    ?.copyWith(color: Colors.white70),
+              ),
+            ),
           const SizedBox(height: 12),
-          SegmentedButton<StreamProfile>(
-            segments: [
+          DropdownButtonFormField<StreamProfile>(
+            initialValue: config.profile,
+            decoration: const InputDecoration(labelText: 'Stream profile'),
+            items: [
               for (final profile in profiles)
-                ButtonSegment(value: profile, label: Text(profile.name)),
+                DropdownMenuItem(
+                  value: profile,
+                  child: Text('${profile.name} - ${profile.description}'),
+                ),
             ],
-            selected: {config.profile},
-            onSelectionChanged: (selection) => onProfileChanged(selection.first),
+            onChanged: (profile) {
+              if (profile != null) onProfileChanged(profile);
+            },
           ),
           const SizedBox(height: 10),
           Row(
@@ -407,6 +559,38 @@ class _SettingsPanel extends StatelessWidget {
                 ),
               ),
             ],
+          ),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              FilterChip(
+                label: const Text('Auto rediscover'),
+                selected: config.autoReconnect,
+                onSelected: onAutoReconnectChanged,
+              ),
+              FilterChip(
+                label: const Text('Keep screen awake'),
+                selected: config.keepScreenOn,
+                onSelected: onKeepScreenOnChanged,
+              ),
+              FilterChip(
+                label: const Text('Rule-of-thirds grid'),
+                selected: config.showSafeAreaGrid,
+                onSelected: onGridChanged,
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Text(
+              'Platform: ${capabilities['platform'] ?? 'unknown'} | Transport: ${capabilities['transportStatus'] ?? 'checking'}',
+              style: Theme.of(context)
+                  .textTheme
+                  .labelSmall
+                  ?.copyWith(color: Colors.white60),
+            ),
           ),
         ],
       ),

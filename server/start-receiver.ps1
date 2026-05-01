@@ -2,6 +2,7 @@ param(
     [int]$SrtPort = 7070,
     [int]$ObsUdpPort = 15000,
     [int]$LatencyMs = 80,
+    [switch]$Health,
     [switch]$NoDiscovery
 )
 
@@ -35,7 +36,14 @@ $ffmpegPath = if ($ffmpeg.Source) { $ffmpeg.Source } else { $ffmpeg.FullName }
 
 $tailscaleIp = $null
 if (Get-Command tailscale -ErrorAction SilentlyContinue) {
-    $tailscaleIp = (& tailscale ip -4 2>$null | Select-Object -First 1)
+    try {
+        $tailscaleOutput = & tailscale ip -4 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            $tailscaleIp = ($tailscaleOutput | Select-Object -First 1)
+        }
+    } catch {
+        $tailscaleIp = $null
+    }
 }
 
 $latencyUs = $LatencyMs * 1000
@@ -43,6 +51,21 @@ $inputUrl = "srt://0.0.0.0:$($SrtPort)?mode=listener&transtype=live&latency=$lat
 
 $target = "udp://127.0.0.1:$($ObsUdpPort)?pkt_size=1316"
 $obsInput = "udp://127.0.0.1:$ObsUdpPort"
+
+if ($Health) {
+    [pscustomobject]@{
+        service = "project-o-stream-receiver"
+        version = "3.0"
+        tailscaleIp = $tailscaleIp
+        srtPort = $SrtPort
+        obsUdpPort = $ObsUdpPort
+        latencyMs = $LatencyMs
+        ffmpeg = $ffmpegPath
+        discoveryEnabled = -not $NoDiscovery
+        obsInput = $obsInput
+    } | ConvertTo-Json -Depth 4
+    return
+}
 
 $discoveryJob = $null
 if (-not $NoDiscovery) {
@@ -83,7 +106,7 @@ try {
             $out = Receive-Job $discoveryJob -ErrorAction SilentlyContinue
             Write-Host ""
             if ($out) { $out | Where-Object { $_ } | ForEach-Object { Write-Host $_ } }
-            Write-Host "[Receiver] Discovery server stopped — halting receiver."
+            Write-Host "[Receiver] Discovery server stopped - halting receiver."
             if (-not $proc.HasExited) { $proc.Kill() }
             break
         }

@@ -1,7 +1,7 @@
 name: project_o_stream
-description: Native mobile camera sender for Project O Stream.
+description: Native mobile camera sender for Project O Stream. Mobile development stays on main; this branch is reserved for the Tauri + Svelte desktop controller.
 publish_to: none
-version: 0.1.0+1
+version: 3.0.0+300
 
 environment:
   sdk: ">=3.4.0 <4.0.0"

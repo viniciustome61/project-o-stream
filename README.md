@@ -2,14 +2,24 @@
 
 > **Send your phone camera to OBS in real-time — hardware-encoded, over a private Tailscale network, with zero IP configuration.**
 
+## Branch Scope
+
+This branch is desktop-only.
+
+- `main` is the mobile app branch for Flutter Android/iOS work.
+- `desktop/tauri-svelte` is the desktop branch for the Tauri + Svelte controller and desktop packaging.
+
+Keep mobile feature work and release automation on `main`. Keep Tauri, Svelte, Rust desktop-shell, and desktop packaging work on this branch.
+
 ---
 
 ## 📥 Downloads
 
 | Platform | Build Type | Link |
 | --- | --- | --- |
-| **Android** | Debug APK | [v0.1.0-android-debug.apk](https://github.com/TeusDev/project-o-stream/releases/download/v0.1.0/project-o-stream-v0.1.0-android-debug.apk) |
-| **iOS** | Simulator Zip | [v0.1.0-ios-simulator-debug.zip](https://github.com/TeusDev/project-o-stream/releases/download/v0.1.0/project-o-stream-v0.1.0-ios-simulator-debug.zip) |
+| **Android** | Debug APK | v3.0.0 artifact pending from the mobile `main` release workflow |
+| **iOS** | Simulator Zip | v3.0.0 artifact pending from the mobile `main` release workflow |
+| **Desktop** | Tauri Controller | Built from `desktop/tauri-svelte` with `cd desktop && npm run tauri build` |
 
 *Note: The iOS build is for **simulators only**. To run on a physical iPhone, follow the [iOS Build](#ios-build) instructions.*
 
@@ -40,6 +50,17 @@
 ```
 
 The receiver script (`start-receiver.ps1`) starts ffmpeg in SRT listener mode and simultaneously launches a discovery daemon. The mobile app needs no manual configuration — it finds the receiver automatically and begins streaming with one tap.
+
+---
+
+## 3.0 Feature Audit
+
+| App version | Current 3.0 status | Full-featured coverage |
+| --- | --- | --- |
+| Android | Production streaming path | Camera preview, hardware StreamPack SRT sender, discovery, receiver cache, SRT latency, HEVC toggle, mic toggle, zoom/torch commands, keep-awake mode, composition grid, expanded stream profiles, capability reporting |
+| iOS | Preview and controller path | Camera preview, discovery, receiver cache, camera switch, zoom/torch commands, keep-awake mode, composition grid, expanded stream profiles, capability reporting; SRT send still requires `libsrt.xcframework` integration |
+| Desktop | Operational controller | Real Tauri commands for receiver start/stop, status, OBS launch, doctor diagnostics, Tailscale/port visibility, desktop-only metadata |
+| Receiver | Workstation runtime | ffmpeg SRT listener, OBS UDP remux, discovery probes/offers, duplicate receiver detection, structured 3.0 health output |
 
 ---
 
@@ -91,15 +112,15 @@ Both peers detect each other and both exit. Only restart one.
 ```
 project-o-stream/                ← Flutter project root (pubspec.yaml here)
 │
-├── desktop/                     Tauri 2 + SvelteKit Desktop App
+├── desktop/                     Tauri 2 + SvelteKit desktop app (desktop branch only)
 │   ├── src/                     Svelte frontend (Tailwind CSS)
 │   └── src-tauri/               Rust backend
 │
 ├── lib/                         Dart source
 ...
-## Desktop Controller (Refactor)
+## Desktop Controller
 
-The `desktop/` directory contains a modern desktop application built with **Tauri 2** and **SvelteKit**. It provides a sleek, glassmorphism UI to manage the receiver and OBS integration.
+The `desktop/` directory contains a desktop-only application built with **Tauri 2** and **SvelteKit**. This work lives on `desktop/tauri-svelte`; mobile remains on `main`.
 
 ### Development
 
