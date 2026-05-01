@@ -9,6 +9,7 @@ class AppDelegate: FlutterAppDelegate, FlutterStreamHandler, FlutterImplicitEngi
     private var methodChannel: FlutterMethodChannel?
     private var eventChannel: FlutterEventChannel?
     private var nativeBridgeRegistered = false
+    private var platformViewRegistered = false
     private var bootOverlay: UIView?
     private weak var bootOverlayLabel: UILabel?
 
@@ -44,6 +45,16 @@ class AppDelegate: FlutterAppDelegate, FlutterStreamHandler, FlutterImplicitEngi
         let events = FlutterEventChannel(name: "project_o_stream/events", binaryMessenger: messenger)
         events.setStreamHandler(self)
         eventChannel = events
+
+        if !platformViewRegistered,
+           let registrar = registrar(forPlugin: "ProjectOStreamPreview") {
+            registrar.register(
+                PreviewFactory(camera: camera),
+                withId: "project_o_stream/preview"
+            )
+            platformViewRegistered = true
+            print("[PO] registered iOS platform view factory")
+        }
     }
 
     private func installNativeBridgeWhenFlutterViewIsReady() {
@@ -79,27 +90,7 @@ class AppDelegate: FlutterAppDelegate, FlutterStreamHandler, FlutterImplicitEngi
         controller.view.backgroundColor = .clear
 
         registerNativeBridge(messenger: controller.binaryMessenger)
-        installPreviewBehindFlutter(in: window, below: controller.view)
         installBootOverlay(in: window, status: "native boot ok")
-    }
-
-    func installPreviewBehindFlutter(in window: UIWindow, below flutterView: UIView) {
-        let preview = camera.previewView
-        let container = flutterView.superview ?? window
-
-        preview.isUserInteractionEnabled = false
-        preview.frame = container.bounds
-        preview.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        preview.translatesAutoresizingMaskIntoConstraints = true
-
-        if preview.superview !== container {
-            preview.removeFromSuperview()
-            container.insertSubview(preview, belowSubview: flutterView)
-        } else {
-            container.insertSubview(preview, belowSubview: flutterView)
-        }
-
-        print("[PO] native preview installed behind Flutter. frame=\(preview.frame)")
     }
 
     private func installBootOverlay(in window: UIWindow, status: String) {

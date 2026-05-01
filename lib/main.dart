@@ -196,6 +196,45 @@ class _SenderScreenState extends State<SenderScreen> {
     }
   }
 
+  Future<void> _switchCamera() async {
+    if (_busy) return;
+    try {
+      await NativeStreamer.switchCamera();
+      setState(() {
+        _torch = false;
+        _status = 'Camera switched';
+      });
+    } catch (error) {
+      setState(() => _status = 'Camera switch failed: $error');
+    }
+  }
+
+  Future<void> _toggleTorch() async {
+    if (_busy) return;
+    final next = !_torch;
+    try {
+      await NativeStreamer.setTorch(next);
+      setState(() {
+        _torch = next;
+        _status = next ? 'Torch on' : 'Torch off';
+      });
+    } catch (error) {
+      setState(() {
+        _torch = false;
+        _status = 'Torch failed: $error';
+      });
+    }
+  }
+
+  Future<void> _setZoom(double value) async {
+    setState(() => _zoom = value);
+    try {
+      await NativeStreamer.setZoom(value);
+    } catch (error) {
+      setState(() => _status = 'Zoom failed: $error');
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -280,7 +319,8 @@ class _SenderScreenState extends State<SenderScreen> {
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
                       IconButton.filledTonal(
-                        onPressed: _busy ? null : NativeStreamer.switchCamera,
+                        onPressed:
+                            _busy ? null : () => unawaited(_switchCamera()),
                         icon: const Icon(Icons.cameraswitch),
                       ),
                       GestureDetector(
@@ -307,13 +347,8 @@ class _SenderScreenState extends State<SenderScreen> {
                         ),
                       ),
                       IconButton.filledTonal(
-                        onPressed: _busy
-                            ? null
-                            : () async {
-                                final next = !_torch;
-                                await NativeStreamer.setTorch(next);
-                                setState(() => _torch = next);
-                              },
+                        onPressed:
+                            _busy ? null : () => unawaited(_toggleTorch()),
                         icon: Icon(_torch ? Icons.flash_on : Icons.flash_off),
                       ),
                     ],
@@ -325,10 +360,7 @@ class _SenderScreenState extends State<SenderScreen> {
                   max: 8,
                   divisions: 28,
                   label: '${_zoom.toStringAsFixed(1)}x',
-                  onChanged: (value) async {
-                    setState(() => _zoom = value);
-                    await NativeStreamer.setZoom(value);
-                  },
+                  onChanged: (value) => unawaited(_setZoom(value)),
                 ),
               ],
             ),
@@ -386,7 +418,7 @@ class NativePreview extends StatelessWidget {
       case TargetPlatform.android:
         return const AndroidView(viewType: 'project_o_stream/preview');
       case TargetPlatform.iOS:
-        return const SizedBox.expand();
+        return const UiKitView(viewType: 'project_o_stream/preview');
       default:
         return const ColoredBox(color: Colors.black);
     }

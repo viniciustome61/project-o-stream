@@ -8,12 +8,16 @@ import VideoToolbox
 final class CameraController: NSObject {
     let previewView = PreviewHostView()
 
+    private let captureSession = AVCaptureSession()
+    private let captureQueue = DispatchQueue(label: "project_o_stream.capture")
     private let connection = SRTConnection()
     private lazy var stream = SRTStream(connection: connection)
     private lazy var mixer = MediaMixer()
-    private lazy var hkView = MTHKView(frame: .zero)
+    private var activeVideoInput: AVCaptureDeviceInput?
+    private var activeAudioInput: AVCaptureDeviceInput?
     private var cameraPosition: AVCaptureDevice.Position = .back
     private var configured = false
+    private var previewRunning = false
     private var streaming = false
 
     func configure() async throws {
@@ -36,47 +40,36 @@ final class CameraController: NSObject {
                           userInfo: [NSLocalizedDescriptionKey: "Microphone permission denied"])
         }
 
-        print("[PO] attaching video device")
-        try await mixer.attachVideo(
-            AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
-            track: 0
-        )
-        print("[PO] attaching audio device")
-        try await mixer.attachAudio(AVCaptureDevice.default(for: .audio), track: 0)
+        print("[PO] configuring AVCaptureSession preview")
+        captureSession.beginConfiguration()
+        captureSession.sessionPreset = .hd1920x1080
+        try installVideoInput(position: cameraPosition)
+        installAudioInputIfAvailable()
+        captureSession.commitConfiguration()
 
-        print("[PO] setting video codec settings")
-        try await stream.setVideoSettings(VideoCodecSettings(
-            videoSize: CGSize(width: 3840, height: 2160),
-            bitRate: 12 * 1_000_000,
-            profileLevel: kVTProfileLevel_H264_High_AutoLevel as String
-        ))
-
-        print("[PO] addOutput(hkView)")
-        await mixer.addOutput(hkView)
-        hkView.videoGravity = .resizeAspect
-        let initialFrame = previewView.bounds.isEmpty
-            ? CGRect(x: 0, y: 0, width: UIScreen.main.bounds.width, height: UIScreen.main.bounds.height)
-            : previewView.bounds
-        print("[PO] hkView initial frame: \(initialFrame)  previewView.bounds: \(previewView.bounds)")
-        hkView.frame = initialFrame
-        if hkView.superview !== previewView {
-            hkView.removeFromSuperview()
-            previewView.addSubview(hkView)
-            hkView.translatesAutoresizingMaskIntoConstraints = false
-            NSLayoutConstraint.activate([
-                hkView.topAnchor.constraint(equalTo: previewView.topAnchor),
-                hkView.bottomAnchor.constraint(equalTo: previewView.bottomAnchor),
-                hkView.leadingAnchor.constraint(equalTo: previewView.leadingAnchor),
-                hkView.trailingAnchor.constraint(equalTo: previewView.trailingAnchor),
-            ])
-        }
+        previewView.attach(session: captureSession)
+        previewView.previewLayer.videoGravity = .resizeAspectFill
         previewView.layoutIfNeeded()
         configured = true
-        print("[PO] configure() complete - hkView.frame after layout: \(hkView.frame)")
+        print("[PO] configure() complete - previewLayer.frame: \(previewView.previewLayer.frame)")
     }
 
     func startPreview() async throws {
-        // Capture starts automatically once devices are attached to the mixer.
+        guard configured else {
+            try await configure()
+            return
+        }
+        guard !previewRunning else { return }
+
+        previewRunning = true
+        let session = captureSession
+        captureQueue.async {
+            if !session.isRunning {
+                print("[PO] captureSession.startRunning()")
+                session.startRunning()
+                print("[PO] captureSession running: \(session.isRunning)")
+            }
+        }
     }
 
     func startStream(config: [String: Any]) async throws {
@@ -95,6 +88,10 @@ final class CameraController: NSObject {
             profileLevel: kVTProfileLevel_H264_High_AutoLevel as String
         ))
 
+        try await mixer.attachVideo(activeVideoInput?.device ?? currentVideoDevice(), track: 0)
+        if let audioDevice = activeAudioInput?.device ?? AVCaptureDevice.default(for: .audio) {
+            try await mixer.attachAudio(audioDevice, track: 0)
+        }
         await mixer.addOutput(stream)
 
         guard let url = URL(string: "srt://\(host):\(port)?mode=caller&latency=\(latencyMs)") else {
@@ -115,36 +112,92 @@ final class CameraController: NSObject {
 
     func stop() {
         stopStream()
+        previewRunning = false
+        let session = captureSession
+        captureQueue.async {
+            if session.isRunning {
+                print("[PO] captureSession.stopRunning()")
+                session.stopRunning()
+            }
+        }
     }
 
     func switchCamera() async throws {
         cameraPosition = cameraPosition == .back ? .front : .back
-        try await mixer.attachVideo(
-            AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: cameraPosition),
-            track: 0
-        )
+        captureSession.beginConfiguration()
+        try installVideoInput(position: cameraPosition)
+        captureSession.commitConfiguration()
+        if streaming {
+            try await mixer.attachVideo(currentVideoDevice(), track: 0)
+        }
+        print("[PO] switched camera to \(cameraPosition == .back ? "back" : "front")")
     }
 
     func setTorch(_ enabled: Bool) async throws {
-        try await mixer.configuration(video: 0) { unit in
-            guard let device = unit.device, device.hasTorch else { return }
-            try device.lockForConfiguration()
-            device.torchMode = enabled ? .on : .off
-            device.unlockForConfiguration()
+        let device = currentVideoDevice()
+        guard device.hasTorch else {
+            throw NSError(domain: "ProjectOStream", code: 5,
+                          userInfo: [NSLocalizedDescriptionKey: "Torch is not available on this camera"])
         }
+        try device.lockForConfiguration()
+        if enabled {
+            try device.setTorchModeOn(level: AVCaptureDevice.maxAvailableTorchLevel)
+        } else {
+            device.torchMode = .off
+        }
+        device.unlockForConfiguration()
+        print("[PO] torch \(enabled ? "on" : "off")")
     }
 
     func setZoom(_ value: CGFloat) async throws {
-        try await mixer.configuration(video: 0) { unit in
-            guard let device = unit.device else { return }
-            try device.lockForConfiguration()
-            device.videoZoomFactor = min(max(value, 1), device.activeFormat.videoMaxZoomFactor)
-            device.unlockForConfiguration()
+        let device = currentVideoDevice()
+        try device.lockForConfiguration()
+        device.videoZoomFactor = min(max(value, 1), device.activeFormat.videoMaxZoomFactor)
+        device.unlockForConfiguration()
+        print("[PO] zoom \(value)")
+    }
+
+    private func installVideoInput(position: AVCaptureDevice.Position) throws {
+        guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position) else {
+            throw NSError(domain: "ProjectOStream", code: 6,
+                          userInfo: [NSLocalizedDescriptionKey: "No \(position == .back ? "back" : "front") camera found"])
         }
+
+        let input = try AVCaptureDeviceInput(device: device)
+        if let activeVideoInput {
+            captureSession.removeInput(activeVideoInput)
+        }
+        guard captureSession.canAddInput(input) else {
+            throw NSError(domain: "ProjectOStream", code: 7,
+                          userInfo: [NSLocalizedDescriptionKey: "Cannot attach camera input"])
+        }
+        captureSession.addInput(input)
+        activeVideoInput = input
+    }
+
+    private func installAudioInputIfAvailable() {
+        guard activeAudioInput == nil,
+              let device = AVCaptureDevice.default(for: .audio),
+              let input = try? AVCaptureDeviceInput(device: device),
+              captureSession.canAddInput(input) else {
+            return
+        }
+        captureSession.addInput(input)
+        activeAudioInput = input
+    }
+
+    private func currentVideoDevice() -> AVCaptureDevice {
+        if let device = activeVideoInput?.device {
+            return device
+        }
+        return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: cameraPosition)
+            ?? AVCaptureDevice.default(for: .video)!
     }
 }
 
 final class PreviewHostView: UIView {
+    let previewLayer = AVCaptureVideoPreviewLayer()
+
     override init(frame: CGRect) {
         super.init(frame: frame)
         configureView()
@@ -160,11 +213,17 @@ final class PreviewHostView: UIView {
         clipsToBounds = true
         isOpaque = true
         isUserInteractionEnabled = false
+        previewLayer.videoGravity = .resizeAspectFill
+        layer.addSublayer(previewLayer)
+    }
+
+    func attach(session: AVCaptureSession) {
+        previewLayer.session = session
+        setNeedsLayout()
     }
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        // Keep Metal sublayers in sync when Flutter resizes this view.
-        subviews.forEach { $0.frame = bounds }
+        previewLayer.frame = bounds
     }
 }
