@@ -6,7 +6,7 @@ plugins {
 
 android {
     namespace 'com.projecto.stream'
-    compileSdk 35
+    compileSdk 36
     ndkVersion flutter.ndkVersion
 
     compileOptions {
@@ -83,7 +83,7 @@ flutter {
 }
 
 dependencies {
-    implementation 'androidx.core:core-ktx:1.15.0'
+    implementation 'androidx.core:core-ktx:1.17.0'
     implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.8.7'
     implementation 'io.github.thibaultbee.streampack:streampack-core:3.1.2'
     implementation 'io.github.thibaultbee.streampack:streampack-ui:3.1.2'
