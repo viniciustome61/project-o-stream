@@ -39,6 +39,12 @@ final class CameraController: NSObject {
 
         await mixer.addOutput(hkView)
         hkView.videoGravity = .resizeAspect
+        // Give hkView the parent's current bounds as its initial frame so CAMetalLayer
+        // has a non-zero size before Auto Layout takes over. Without this the Metal layer
+        // can initialise at {0,0} and never render frames even after constraints are set.
+        hkView.frame = previewView.bounds.isEmpty
+            ? CGRect(x: 0, y: 0, width: UIScreen.main.bounds.width, height: UIScreen.main.bounds.height)
+            : previewView.bounds
         previewView.addSubview(hkView)
         hkView.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
@@ -47,6 +53,7 @@ final class CameraController: NSObject {
             hkView.leadingAnchor.constraint(equalTo: previewView.leadingAnchor),
             hkView.trailingAnchor.constraint(equalTo: previewView.trailingAnchor),
         ])
+        previewView.layoutIfNeeded()
     }
 
     func startPreview() async throws {
@@ -118,4 +125,10 @@ final class CameraController: NSObject {
     }
 }
 
-final class PreviewHostView: UIView {}
+final class PreviewHostView: UIView {
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        // Keep Metal sublayers in sync when Flutter resizes this view.
+        subviews.forEach { $0.frame = bounds }
+    }
+}

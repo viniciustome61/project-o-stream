@@ -2,16 +2,24 @@ import Flutter
 import UIKit
 
 class SceneDelegate: FlutterSceneDelegate {
+    // UIWindowSceneDelegate requires this property. FlutterSceneDelegate sets it during
+    // super.scene(_:willConnectTo:options:). We declare it so we can read it back.
+    var window: UIWindow?
+
     override func scene(
         _ scene: UIScene,
         willConnectTo session: UISceneSession,
         options connectionOptions: UIScene.ConnectionOptions
     ) {
-        // Flutter creates UIWindow + FlutterViewController during super.
+        // Flutter creates the UIWindow + FlutterViewController and assigns self.window.
         super.scene(scene, willConnectTo: session, options: connectionOptions)
 
-        guard let windowScene = scene as? UIWindowScene,
-              let controller = windowScene.windows.first?.rootViewController as? FlutterViewController,
+        // Prefer the UIWindowSceneDelegate property; fall back to scene's window list.
+        let rootWindow = self.window
+            ?? (scene as? UIWindowScene)?.windows.first(where: { $0.isKeyWindow })
+            ?? (scene as? UIWindowScene)?.windows.first
+
+        guard let controller = rootWindow?.rootViewController as? FlutterViewController,
               let appDelegate = UIApplication.shared.delegate as? AppDelegate else {
             return
         }
