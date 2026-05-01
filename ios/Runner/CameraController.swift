@@ -16,35 +16,43 @@ final class CameraController: NSObject {
     private var streaming = false
 
     func configure() async throws {
-        guard await AVCaptureDevice.requestAccess(for: .video) else {
+        print("[PO] configure() start — requesting camera permission")
+        let camOK = await AVCaptureDevice.requestAccess(for: .video)
+        print("[PO] camera permission: \(camOK)")
+        guard camOK else {
             throw NSError(domain: "ProjectOStream", code: 3,
                           userInfo: [NSLocalizedDescriptionKey: "Camera permission denied"])
         }
-        guard await AVCaptureDevice.requestAccess(for: .audio) else {
+        let micOK = await AVCaptureDevice.requestAccess(for: .audio)
+        print("[PO] mic permission: \(micOK)")
+        guard micOK else {
             throw NSError(domain: "ProjectOStream", code: 4,
                           userInfo: [NSLocalizedDescriptionKey: "Microphone permission denied"])
         }
 
+        print("[PO] attaching video device")
         try await mixer.attachVideo(
             AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
             track: 0
         )
+        print("[PO] attaching audio device")
         try await mixer.attachAudio(AVCaptureDevice.default(for: .audio), track: 0)
 
+        print("[PO] setting video codec settings")
         try await stream.setVideoSettings(VideoCodecSettings(
             videoSize: CGSize(width: 3840, height: 2160),
             bitRate: 12 * 1_000_000,
             profileLevel: kVTProfileLevel_H264_High_AutoLevel as String
         ))
 
+        print("[PO] addOutput(hkView)")
         await mixer.addOutput(hkView)
         hkView.videoGravity = .resizeAspect
-        // Give hkView the parent's current bounds as its initial frame so CAMetalLayer
-        // has a non-zero size before Auto Layout takes over. Without this the Metal layer
-        // can initialise at {0,0} and never render frames even after constraints are set.
-        hkView.frame = previewView.bounds.isEmpty
+        let initialFrame = previewView.bounds.isEmpty
             ? CGRect(x: 0, y: 0, width: UIScreen.main.bounds.width, height: UIScreen.main.bounds.height)
             : previewView.bounds
+        print("[PO] hkView initial frame: \(initialFrame)  previewView.bounds: \(previewView.bounds)")
+        hkView.frame = initialFrame
         previewView.addSubview(hkView)
         hkView.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
@@ -54,6 +62,7 @@ final class CameraController: NSObject {
             hkView.trailingAnchor.constraint(equalTo: previewView.trailingAnchor),
         ])
         previewView.layoutIfNeeded()
+        print("[PO] configure() complete — hkView.frame after layout: \(hkView.frame)")
     }
 
     func startPreview() async throws {

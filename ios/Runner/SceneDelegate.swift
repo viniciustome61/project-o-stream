@@ -7,23 +7,29 @@ class SceneDelegate: FlutterSceneDelegate {
         willConnectTo session: UISceneSession,
         options connectionOptions: UIScene.ConnectionOptions
     ) {
-        // Flutter creates the UIWindow + FlutterViewController and assigns self.window.
+        print("[PO] SceneDelegate.scene willConnectTo — calling super")
         super.scene(scene, willConnectTo: session, options: connectionOptions)
+        print("[PO] super returned. self.window=\(String(describing: self.window))")
 
-        // Prefer the UIWindowSceneDelegate property; fall back to scene's window list.
         let rootWindow = self.window
             ?? (scene as? UIWindowScene)?.windows.first(where: { $0.isKeyWindow })
             ?? (scene as? UIWindowScene)?.windows.first
 
+        print("[PO] rootWindow=\(String(describing: rootWindow))")
+        print("[PO] rootVC=\(String(describing: rootWindow?.rootViewController))")
+
         guard let controller = rootWindow?.rootViewController as? FlutterViewController,
               let appDelegate = UIApplication.shared.delegate as? AppDelegate else {
+            print("[PO] GUARD FAILED — channels NOT registered. rootVC type: \(type(of: rootWindow?.rootViewController))")
             return
         }
 
+        print("[PO] FlutterViewController found — registering channels")
         let messenger = controller.binaryMessenger
 
         FlutterMethodChannel(name: "project_o_stream/native", binaryMessenger: messenger)
             .setMethodCallHandler { [weak appDelegate] call, result in
+                print("[PO] MethodChannel call: \(call.method)")
                 appDelegate?.handle(call: call, result: result)
             }
 
@@ -34,5 +40,6 @@ class SceneDelegate: FlutterSceneDelegate {
             PreviewFactory(camera: appDelegate.camera),
             withId: "project_o_stream/preview"
         )
+        print("[PO] Channels + platform view factory registered OK")
     }
 }

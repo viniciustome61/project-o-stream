@@ -64,6 +64,19 @@ class _SenderScreenState extends State<SenderScreen> {
   Map<String, Object?> _capabilities = const {};
   DiscoveredReceiver? _receiver;
 
+  // ── debug overlay ──────────────────────────────────────────────
+  final List<String> _log = [];
+  bool _showDebug = false;
+  int _versionTaps = 0;
+
+  void _dbg(String msg) {
+    final ts = DateTime.now().toIso8601String().substring(11, 23);
+    // ignore: avoid_print
+    debugPrint('[PO-dart $ts] $msg');
+    if (mounted) setState(() => _log.add('$ts $msg'));
+  }
+  // ───────────────────────────────────────────────────────────────
+
   @override
   void initState() {
     super.initState();
@@ -96,18 +109,25 @@ class _SenderScreenState extends State<SenderScreen> {
   }
 
   Future<void> _boot() async {
+    _dbg('_boot() start');
     try {
       await _load();
+      _dbg('calling initialize()');
       await NativeStreamer.initialize();
+      _dbg('initialize() OK');
       _capabilities = await NativeStreamer.getCapabilities();
+      _dbg('capabilities: $_capabilities');
       await NativeStreamer.setKeepScreenOn(_config.keepScreenOn);
       await NativeStreamer.startPreview();
+      _dbg('startPreview() OK');
       await _discover();
       setState(() {
         _busy = false;
         _status = _receiver == null ? 'Searching receiver' : 'Ready';
       });
+      _dbg('boot complete. status=$_status');
     } catch (error) {
+      _dbg('boot ERROR: $error');
       setState(() {
         _busy = false;
         _status = 'Camera unavailable: $error';
@@ -125,6 +145,7 @@ class _SenderScreenState extends State<SenderScreen> {
   }
 
   void _handleNativeEvent(Map<String, Object?> event) {
+    _dbg('native event: $event');
     setState(() {
       _status = event['status']?.toString() ?? _status;
       _stats = event['stats']?.toString() ?? _stats;
@@ -195,10 +216,19 @@ class _SenderScreenState extends State<SenderScreen> {
             child: Column(
               children: [
                 _TopBar(
-                    status: _status,
-                    live: _live,
-                    stats: _stats,
-                    capabilities: _capabilities),
+                  status: _status,
+                  live: _live,
+                  stats: _stats,
+                  capabilities: _capabilities,
+                  version: AppMetadata.version,
+                  onVersionTap: () {
+                    _versionTaps++;
+                    if (_versionTaps >= 5) {
+                      _versionTaps = 0;
+                      setState(() => _showDebug = !_showDebug);
+                    }
+                  },
+                ),
                 const Spacer(),
                 if (_config.showSafeAreaGrid)
                   const Expanded(child: _CompositionGrid()),
@@ -292,6 +322,44 @@ class _SenderScreenState extends State<SenderScreen> {
               ],
             ),
           ),
+          // ── debug overlay ─────────────────────────────────────
+          if (_showDebug)
+            Positioned.fill(
+              child: GestureDetector(
+                onTap: () => setState(() => _showDebug = false),
+                child: Container(
+                  color: Colors.black.withValues(alpha: .88),
+                  padding: const EdgeInsets.all(12),
+                  child: SafeArea(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('DEBUG LOG  (tap anywhere to close)',
+                            style: TextStyle(
+                                color: Colors.yellow,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 12)),
+                        const SizedBox(height: 6),
+                        Expanded(
+                          child: ListView.builder(
+                            reverse: true,
+                            itemCount: _log.length,
+                            itemBuilder: (_, i) => Text(
+                              _log[_log.length - 1 - i],
+                              style: const TextStyle(
+                                  color: Colors.white70,
+                                  fontSize: 10,
+                                  fontFamily: 'monospace'),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          // ──────────────────────────────────────────────────────
         ],
       ),
     );
@@ -320,12 +388,16 @@ class _TopBar extends StatelessWidget {
     required this.live,
     required this.stats,
     required this.capabilities,
+    required this.version,
+    required this.onVersionTap,
   });
 
   final String status;
   final bool live;
   final String stats;
   final Map<String, Object?> capabilities;
+  final String version;
+  final VoidCallback onVersionTap;
 
   @override
   Widget build(BuildContext context) {
@@ -353,8 +425,11 @@ class _TopBar extends StatelessWidget {
                   style: const TextStyle(fontWeight: FontWeight.w700),
                 ),
               ),
-              Text(AppMetadata.version,
-                  style: Theme.of(context).textTheme.labelMedium),
+              GestureDetector(
+                onTap: onVersionTap,
+                child: Text(version,
+                    style: Theme.of(context).textTheme.labelMedium),
+              ),
             ],
           ),
           const SizedBox(height: 8),
