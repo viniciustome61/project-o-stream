@@ -4,12 +4,11 @@ import UIKit
 
 @UIApplicationMain
 class AppDelegate: FlutterAppDelegate, FlutterStreamHandler, FlutterImplicitEngineDelegate {
-    let camera = CameraController()
     var eventSink: FlutterEventSink?
     private var methodChannel: FlutterMethodChannel?
     private var eventChannel: FlutterEventChannel?
     private var nativeBridgeRegistered = false
-    private var platformViewRegistered = false
+    private var camera: CameraController?
     private var bootOverlay: UIView?
     private weak var bootOverlayLabel: UILabel?
 
@@ -46,15 +45,17 @@ class AppDelegate: FlutterAppDelegate, FlutterStreamHandler, FlutterImplicitEngi
         events.setStreamHandler(self)
         eventChannel = events
 
-        if !platformViewRegistered,
-           let registrar = registrar(forPlugin: "ProjectOStreamPreview") {
-            registrar.register(
-                PreviewFactory(camera: camera),
-                withId: "project_o_stream/preview"
-            )
-            platformViewRegistered = true
-            print("[PO] registered iOS platform view factory")
+        print("[PO] native streaming bridge registered")
+    }
+
+    @MainActor
+    private func nativeCamera() -> CameraController {
+        if let camera {
+            return camera
         }
+        let camera = CameraController()
+        self.camera = camera
+        return camera
     }
 
     private func installNativeBridgeWhenFlutterViewIsReady() {
@@ -148,7 +149,7 @@ class AppDelegate: FlutterAppDelegate, FlutterStreamHandler, FlutterImplicitEngi
             do {
                 switch call.method {
                 case "initialize":
-                    try await camera.configure()
+                    try await nativeCamera().configure()
                     send(status: "Ready", live: false)
                     result(nil)
                 case "flutterRendered":
@@ -156,11 +157,11 @@ class AppDelegate: FlutterAppDelegate, FlutterStreamHandler, FlutterImplicitEngi
                     updateBootOverlay("flutter frame rendered")
                     result(nil)
                 case "startPreview":
-                    try await camera.startPreview()
+                    try await nativeCamera().startPreview()
                     send(status: "Preview", live: false)
                     result(nil)
                 case "stopPreview":
-                    camera.stop()
+                    camera?.stop()
                     send(status: "Preview stopped", live: false)
                     result(nil)
                 case "loadEndpoint":
@@ -199,25 +200,25 @@ class AppDelegate: FlutterAppDelegate, FlutterStreamHandler, FlutterImplicitEngi
                     guard let args = call.arguments as? [String: Any] else {
                         throw StreamError.invalidArguments
                     }
-                    try await camera.startStream(config: args)
+                    try await nativeCamera().startStream(config: args)
                     send(status: "Live", live: true)
                     result(nil)
                 case "stopStream":
-                    camera.stopStream()
+                    camera?.stopStream()
                     send(status: "Ready", live: false)
                     result(nil)
                 case "switchCamera":
-                    try await camera.switchCamera()
+                    try await nativeCamera().switchCamera()
                     send(status: "Camera switched", live: false)
                     result(nil)
                 case "setTorch":
                     let enabled = (call.arguments as? [String: Any])?["enabled"] as? Bool ?? false
-                    try await camera.setTorch(enabled)
+                    try await nativeCamera().setTorch(enabled)
                     send(status: enabled ? "Torch on" : "Torch off", live: false)
                     result(nil)
                 case "setZoom":
                     let value = (call.arguments as? [String: Any])?["value"] as? Double ?? 1
-                    try await camera.setZoom(CGFloat(value))
+                    try await nativeCamera().setZoom(CGFloat(value))
                     send(status: String(format: "Zoom %.1fx", value), live: false)
                     result(nil)
                 case "setKeepScreenOn":
