@@ -1,5 +1,13 @@
 # CI
 
+## GitHub Actions
+
+`.github/workflows/mobile-build.yml` builds the Flutter app from the repository
+root on push, pull request, and manual dispatch. The Android job produces debug
+APK/AAB artifacts. The iOS job runs on macOS and produces an unsigned release
+`Runner.app` with `--no-codesign`; App Store/TestFlight distribution still
+requires signing secrets and export options.
+
 ## Codemagic
 
 The canonical Flutter project root is the repository root. `codemagic.yaml`
