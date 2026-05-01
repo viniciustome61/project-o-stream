@@ -44,10 +44,14 @@ jobs:
         run: flutter analyze
 
       - name: Build debug AAB
-        run: flutter build appbundle --debug
+        run: ./gradlew -p android bundleDebug
 
       - name: Build debug APK
-        run: flutter build apk --debug
+        run: ./gradlew -p android assembleDebug
+
+      - name: List Android outputs
+        if: always()
+        run: find build android/app/build -type f \( -name "*.aab" -o -name "*.apk" \) -print
 
       - name: Upload Android artifacts
         uses: actions/upload-artifact@v4
@@ -57,6 +61,8 @@ jobs:
           path: |
             build/app/outputs/bundle/debug/*.aab
             build/app/outputs/flutter-apk/*.apk
+            android/app/build/outputs/bundle/debug/*.aab
+            android/app/build/outputs/apk/debug/*.apk
 
   ios:
     name: iOS
