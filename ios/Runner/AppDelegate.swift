@@ -4,35 +4,17 @@ import UIKit
 
 @UIApplicationMain
 class AppDelegate: FlutterAppDelegate, FlutterStreamHandler {
-    private let camera = CameraController()
-    private var eventSink: FlutterEventSink?
+    let camera = CameraController()
+    var eventSink: FlutterEventSink?
 
     override func application(
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
     ) -> Bool {
-        // super creates UIWindow and installs FlutterViewController as rootViewController.
-        // Access window only after this call.
         GeneratedPluginRegistrant.register(with: self)
-        let launched = super.application(application, didFinishLaunchingWithOptions: launchOptions)
-
-        let controller = window!.rootViewController as! FlutterViewController
-        let messenger = controller.binaryMessenger
-
-        FlutterMethodChannel(name: "project_o_stream/native", binaryMessenger: messenger)
-            .setMethodCallHandler { [weak self] call, result in
-                self?.handle(call: call, result: result)
-            }
-
-        FlutterEventChannel(name: "project_o_stream/events", binaryMessenger: messenger)
-            .setStreamHandler(self)
-
-        controller.registrar(forPlugin: "ProjectOStreamPreview")?.register(
-            PreviewFactory(camera: camera),
-            withId: "project_o_stream/preview"
-        )
-
-        return launched
+        return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+        // Channel/plugin-view setup is in SceneDelegate.scene(_:willConnectTo:options:)
+        // because AppDelegate.window is always nil in UIScene lifecycle (iOS 13+).
     }
 
     func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
@@ -45,7 +27,7 @@ class AppDelegate: FlutterAppDelegate, FlutterStreamHandler {
         return nil
     }
 
-    private func handle(call: FlutterMethodCall, result: @escaping FlutterResult) {
+    func handle(call: FlutterMethodCall, result: @escaping FlutterResult) {
         Task { @MainActor in
             do {
                 switch call.method {
@@ -132,7 +114,7 @@ class AppDelegate: FlutterAppDelegate, FlutterStreamHandler {
         }
     }
 
-    private func send(status: String, live: Bool) {
+    func send(status: String, live: Bool) {
         eventSink?(["status": status, "live": live, "stats": ""])
     }
 }
