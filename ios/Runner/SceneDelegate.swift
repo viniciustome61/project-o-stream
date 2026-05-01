@@ -2,10 +2,6 @@ import Flutter
 import UIKit
 
 class SceneDelegate: FlutterSceneDelegate {
-    // UIWindowSceneDelegate requires this property. FlutterSceneDelegate sets it during
-    // super.scene(_:willConnectTo:options:). We declare it so we can read it back.
-    var window: UIWindow?
-
     override func scene(
         _ scene: UIScene,
         willConnectTo session: UISceneSession,
