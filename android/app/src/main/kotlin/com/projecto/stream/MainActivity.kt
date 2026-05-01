@@ -114,12 +114,12 @@ class StreamBridge(
             streamer = it
         }
         activeStreamer.setTargetRotation(Surface.ROTATION_0)
-        previewView.streamer = activeStreamer
+        previewView.setVideoSourceProvider(activeStreamer)
         emitStatus("Ready", false)
     }
 
     suspend fun startPreview() {
-        previewView.streamer = requireStreamer()
+        previewView.setVideoSourceProvider(requireStreamer())
         emitStatus("Preview", live)
     }
 
@@ -163,7 +163,8 @@ class StreamBridge(
         val descriptor = UriMediaDescriptor(
             "srt://$host:$port?mode=caller&transtype=live&latency=${latencyMs * 1000}&tlpktdrop=1&pkt_size=1316"
         )
-        activeStreamer.startStream(descriptor)
+        activeStreamer.open(descriptor)
+        activeStreamer.startStream()
         live = true
         emitStatus("Live $codecLabel ${width}x$height@$fps", true)
     }
