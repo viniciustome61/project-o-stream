@@ -5,7 +5,6 @@ import 'package:camera/camera.dart';
 import 'package:flutter/widgets.dart';
 import 'package:gal/gal.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:permission_handler/permission_handler.dart';
 
 class CameraState extends ChangeNotifier with WidgetsBindingObserver {
   CameraController? _controller;
@@ -36,11 +35,6 @@ class CameraState extends ChangeNotifier with WidgetsBindingObserver {
     notifyListeners();
 
     try {
-      final cameraStatus = await Permission.camera.request();
-      if (!cameraStatus.isGranted) {
-        throw CameraException('permission_denied', 'Camera permission denied');
-      }
-
       _cameras = await availableCameras();
       if (_cameras.isEmpty) {
         throw CameraException('no_camera', 'No camera found on this device');

@@ -23,7 +23,7 @@ class StreamApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return ChangeNotifierProvider(
-      create: (_) => CameraState()..initialize(),
+      create: (_) => CameraState(),
       child: MaterialApp(
         debugShowCheckedModeBanner: false,
         theme: ThemeData.dark(useMaterial3: true).copyWith(
@@ -455,14 +455,27 @@ class FlutterCameraPreview extends StatelessWidget {
         }
 
         final message = camera.error ??
-            (camera.isInitializing ? 'Starting camera' : 'Camera released');
+            (camera.isInitializing ? 'Starting camera' : 'Camera ready');
         return ColoredBox(
           color: const Color(0xff101820),
           child: Center(
-            child: Text(
-              message,
-              textAlign: TextAlign.center,
-              style: const TextStyle(color: Colors.white70),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  message,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: Colors.white70),
+                ),
+                const SizedBox(height: 12),
+                FilledButton.icon(
+                  onPressed: camera.isInitializing
+                      ? null
+                      : () => unawaited(camera.initialize()),
+                  icon: const Icon(Icons.videocam),
+                  label: const Text('Start preview'),
+                ),
+              ],
             ),
           ),
         );
