@@ -39,11 +39,10 @@ jobs:
         with:
           flutter-version: '3.41.8'
           cache: true
-      - name: Install Pods
-        working-directory: ios
-        run: pod install
       - name: Build iOS Simulator
-        run: flutter build ios --simulator --debug
+        run: |
+          flutter pub get
+          flutter build ios --simulator --debug --no-codesign
       - name: Zip Simulator App
         run: |
           cd build/ios/iphonesimulator
