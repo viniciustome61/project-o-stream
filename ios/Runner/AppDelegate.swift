@@ -11,7 +11,12 @@ class AppDelegate: FlutterAppDelegate, FlutterStreamHandler {
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
     ) -> Bool {
-        let controller = window?.rootViewController as! FlutterViewController
+        // super creates UIWindow and installs FlutterViewController as rootViewController.
+        // Access window only after this call.
+        GeneratedPluginRegistrant.register(with: self)
+        let launched = super.application(application, didFinishLaunchingWithOptions: launchOptions)
+
+        let controller = window!.rootViewController as! FlutterViewController
         let messenger = controller.binaryMessenger
 
         FlutterMethodChannel(name: "project_o_stream/native", binaryMessenger: messenger)
@@ -27,8 +32,7 @@ class AppDelegate: FlutterAppDelegate, FlutterStreamHandler {
             withId: "project_o_stream/preview"
         )
 
-        GeneratedPluginRegistrant.register(with: self)
-        return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+        return launched
     }
 
     func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
