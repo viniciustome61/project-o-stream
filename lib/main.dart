@@ -1,9 +1,12 @@
 import 'dart:async';
 
+import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:provider/provider.dart';
 
 import 'app_metadata.dart';
+import 'camera_state.dart';
 import 'discovery.dart';
 import 'native_streamer.dart';
 import 'stream_config.dart';
@@ -19,16 +22,19 @@ class StreamApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData.dark(useMaterial3: true).copyWith(
-        scaffoldBackgroundColor: Colors.black,
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xffe5383b),
-          brightness: Brightness.dark,
+    return ChangeNotifierProvider(
+      create: (_) => CameraState()..initialize(),
+      child: MaterialApp(
+        debugShowCheckedModeBanner: false,
+        theme: ThemeData.dark(useMaterial3: true).copyWith(
+          scaffoldBackgroundColor: Colors.black,
+          colorScheme: ColorScheme.fromSeed(
+            seedColor: const Color(0xffe5383b),
+            brightness: Brightness.dark,
+          ),
         ),
+        home: const SenderScreen(),
       ),
-      home: const SenderScreen(),
     );
   }
 }
@@ -117,14 +123,9 @@ class _SenderScreenState extends State<SenderScreen> {
     _dbg('_boot() start');
     try {
       await _load();
-      _dbg('calling initialize()');
-      await NativeStreamer.initialize();
-      _dbg('initialize() OK');
       _capabilities = await NativeStreamer.getCapabilities();
       _dbg('capabilities: $_capabilities');
       await NativeStreamer.setKeepScreenOn(_config.keepScreenOn);
-      await NativeStreamer.startPreview();
-      _dbg('startPreview() OK');
       await _discover();
       setState(() {
         _busy = false;
@@ -160,10 +161,12 @@ class _SenderScreenState extends State<SenderScreen> {
 
   Future<void> _toggleLive() async {
     if (_busy) return;
+    final camera = context.read<CameraState>();
     setState(() => _busy = true);
     try {
       if (_live) {
         await NativeStreamer.stopStream();
+        await camera.initialize();
         setState(() {
           _live = false;
           _status = 'Ready';
@@ -176,6 +179,8 @@ class _SenderScreenState extends State<SenderScreen> {
           setState(() => _status = 'No receiver found');
           return;
         }
+        await camera.release();
+        await NativeStreamer.initialize();
         await NativeStreamer.startStream(_config);
         setState(() {
           _live = true;
@@ -199,7 +204,11 @@ class _SenderScreenState extends State<SenderScreen> {
   Future<void> _switchCamera() async {
     if (_busy) return;
     try {
-      await NativeStreamer.switchCamera();
+      if (_live) {
+        await NativeStreamer.switchCamera();
+      } else {
+        await context.read<CameraState>().switchCamera();
+      }
       setState(() {
         _torch = false;
         _status = 'Camera switched';
@@ -213,7 +222,11 @@ class _SenderScreenState extends State<SenderScreen> {
     if (_busy) return;
     final next = !_torch;
     try {
-      await NativeStreamer.setTorch(next);
+      if (_live) {
+        await NativeStreamer.setTorch(next);
+      } else {
+        await context.read<CameraState>().setTorch(next);
+      }
       setState(() {
         _torch = next;
         _status = next ? 'Torch on' : 'Torch off';
@@ -229,10 +242,24 @@ class _SenderScreenState extends State<SenderScreen> {
   Future<void> _setZoom(double value) async {
     setState(() => _zoom = value);
     try {
-      await NativeStreamer.setZoom(value);
+      if (_live) {
+        await NativeStreamer.setZoom(value);
+      } else {
+        await context.read<CameraState>().setZoom(value);
+      }
     } catch (error) {
       setState(() => _status = 'Zoom failed: $error');
     }
+  }
+
+  Future<void> _capturePhoto() async {
+    if (_busy || _live) return;
+    await context.read<CameraState>().captureAndSave();
+    if (!mounted) return;
+    final error = context.read<CameraState>().error;
+    setState(
+      () => _status = error == null ? 'Photo saved' : 'Photo failed: $error',
+    );
   }
 
   @override
@@ -246,7 +273,7 @@ class _SenderScreenState extends State<SenderScreen> {
               decoration: BoxDecoration(color: Color(0xff101820)),
             ),
           ),
-          const Positioned.fill(child: NativePreview()),
+          const Positioned.fill(child: FlutterCameraPreview()),
           Positioned.fill(
             child: DecoratedBox(
               decoration: BoxDecoration(
@@ -354,6 +381,12 @@ class _SenderScreenState extends State<SenderScreen> {
                     ],
                   ),
                 ),
+                IconButton.filledTonal(
+                  onPressed:
+                      _busy || _live ? null : () => unawaited(_capturePhoto()),
+                  icon: const Icon(Icons.photo_camera),
+                  tooltip: 'Capture photo',
+                ),
                 Slider(
                   value: _zoom,
                   min: 1,
@@ -409,19 +442,32 @@ class _SenderScreenState extends State<SenderScreen> {
   }
 }
 
-class NativePreview extends StatelessWidget {
-  const NativePreview({super.key});
+class FlutterCameraPreview extends StatelessWidget {
+  const FlutterCameraPreview({super.key});
 
   @override
   Widget build(BuildContext context) {
-    switch (Theme.of(context).platform) {
-      case TargetPlatform.android:
-        return const AndroidView(viewType: 'project_o_stream/preview');
-      case TargetPlatform.iOS:
-        return const UiKitView(viewType: 'project_o_stream/preview');
-      default:
-        return const ColoredBox(color: Colors.black);
-    }
+    return Consumer<CameraState>(
+      builder: (context, camera, _) {
+        final controller = camera.controller;
+        if (controller != null && controller.value.isInitialized) {
+          return CameraPreview(controller);
+        }
+
+        final message = camera.error ??
+            (camera.isInitializing ? 'Starting camera' : 'Camera released');
+        return ColoredBox(
+          color: const Color(0xff101820),
+          child: Center(
+            child: Text(
+              message,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Colors.white70),
+            ),
+          ),
+        );
+      },
+    );
   }
 }
 
