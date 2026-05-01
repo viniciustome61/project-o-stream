@@ -13,58 +13,6 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  android:
-    name: Android
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Set up Java
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v4
-
-      - name: Install Android packages
-        run: sdkmanager "platforms;android-36" "build-tools;35.0.0"
-
-      - name: Set up Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.41.8'
-          cache: true
-
-      - name: Get dependencies
-        run: |
-          mkdir -p build
-          flutter pub get
-
-      - name: Analyze
-        run: flutter analyze
-
-      - name: Build debug APK
-        run: |
-          flutter build apk --debug || test -f android/app/build/outputs/flutter-apk/app-debug.apk
-
-      - name: List Android outputs
-        if: always()
-        run: find build android/app/build -type f \( -name "*.aab" -o -name "*.apk" \) -print 2>/dev/null || true
-
-      - name: Upload Android artifacts
-        uses: actions/upload-artifact@v7
-        with:
-          name: android-debug
-          if-no-files-found: error
-          path: |
-            build/app/outputs/bundle/debug/*.aab
-            build/app/outputs/flutter-apk/*.apk
-            android/app/build/outputs/bundle/debug/*.aab
-            android/app/build/outputs/apk/debug/*.apk
-
   ios:
     name: iOS
     runs-on: macos-15
