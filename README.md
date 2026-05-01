@@ -15,13 +15,13 @@ Keep mobile feature work and release automation on `main`. Keep Tauri, Svelte, R
 
 ## 📥 Downloads
 
-| Platform | Build Type | Link |
-| --- | --- | --- |
-| **Android** | Debug APK | v3.0.0 artifact pending from the mobile `main` release workflow |
-| **iOS** | Simulator Zip | v3.0.0 artifact pending from the mobile `main` release workflow |
-| **Desktop** | Tauri Controller | Built from `desktop/tauri-svelte` with `cd desktop && npm run tauri build` |
+Go to [**Releases**](https://github.com/TeusDev/project-o-stream/releases) and grab the latest `v0.3.0` assets:
 
-*Note: The iOS build is for **simulators only**. To run on a physical iPhone, follow the [iOS Build](#ios-build) instructions.*
+| Platform | File | How to install |
+| --- | --- | --- |
+| **Android** | `stream-debug.apk` | Enable *Install unknown apps*, tap the APK |
+| **iOS** | `stream-unsigned.ipa` | See [Installing on iPhone (No Mac)](#installing-on-iphone-no-mac) |
+| **Windows Desktop** | `*.msi` | Run the installer |
 
 ---
 
@@ -195,10 +195,10 @@ npm run tauri dev
 
 | Requirement      | Android                        | iOS                                                         |
 | ---------------- | ------------------------------ | ----------------------------------------------------------- |
-| OS version       | Android 8.0+ (API 26)          | iOS 13.0+                                                   |
+| OS version       | Android 8.0+ (API 26)          | iOS 15.0+                                                   |
 | Tailscale app    | Same tailnet as PC             | Same tailnet as PC                                          |
 | Hardware encoder | H.264 required, H.265 optional | H.264 required (H.265 optional)                             |
-| SRT transport    | StreamPack 3.1.2 (bundled)     | Requires `libsrt.xcframework` — see [iOS Build](#ios-build) |
+| SRT transport    | StreamPack 3.1.2 (bundled)     | HaishinKit 2.2.0 + libsrt.xcframework (bundled via SPM)     |
 
 ### Development (to build the mobile app)
 
@@ -366,23 +366,75 @@ Target SDK: 35.
 
 ### Local Build (iOS)
 
-iOS build requires **macOS with Xcode 15+**.
+Requires **macOS with Xcode 16+** and CocoaPods.
 
 ```bash
-flutter pub get                  # generates Flutter/Generated.xcconfig
-cd ios
-pod install
-open Runner.xcworkspace          # open in Xcode
+flutter pub get        # generates Flutter/Generated.xcconfig
+cd ios && pod install
+open Runner.xcworkspace
 ```
 
-> **SRT streaming on iOS requires `libsrt.xcframework`.**
-> The camera preview, discovery, and UI all work immediately. To enable actual video streaming:
->
-> 1. Download `libsrt.xcframework` from the [SRT Alliance releases](https://github.com/Haivision/srt/releases) or build from source on macOS.
-> 2. In Xcode: select the **Runner** target → **General** → **Frameworks, Libraries, and Embedded Content** → **+** → add `libsrt.xcframework`.
-> 3. Implement `captureOutput(_:didOutput:from:)` in `CameraController.swift` to feed sample buffers into the SRT muxer.
->
-> Without the framework, tapping the stream button shows a clear error: *"iOS SRT transport requires linking libsrt.xcframework in the iOS build."*
+SRT streaming is fully wired via **HaishinKit 2.2.0** + **libsrt 1.5.4**. Both are resolved automatically as Swift Package Manager dependencies — no manual framework download needed. Xcode fetches them on the first build.
+
+---
+
+## Installing on iPhone (No Mac)
+
+CI produces an **unsigned `.ipa`** on every release. You sign and install it on your own iPhone using **Sideloadly** on Windows — no Mac, no paid Apple Developer account required.
+
+> **Limit:** Free Apple IDs can only sign apps for 7 days. After that you re-sign with the same steps. Sideloadly can remind you automatically.
+
+### What you need
+
+- Your Windows PC (the same one running the receiver)
+- Your iPhone connected via USB
+- A free Apple ID (the one already on your iPhone is fine)
+- [Sideloadly](https://sideloadly.io) — free Windows app
+
+### Steps
+
+**1. Download the IPA**
+
+Go to [Releases](https://github.com/TeusDev/project-o-stream/releases), find the latest release, and download `stream-unsigned.ipa`.
+
+**2. Install Sideloadly**
+
+Download and install Sideloadly from [sideloadly.io](https://sideloadly.io). Run it as Administrator the first time so it can install the Apple drivers.
+
+**3. Trust your PC on your iPhone**
+
+Plug your iPhone into the PC via USB. If a *"Trust This Computer?"* prompt appears on the iPhone, tap **Trust**.
+
+**4. Sign and install**
+
+1. Open Sideloadly
+2. Drag `stream-unsigned.ipa` into the Sideloadly window (or click the IPA icon to browse)
+3. Make sure your iPhone appears in the device dropdown
+4. Enter your Apple ID email — Sideloadly will prompt for the password and handle 2FA
+5. Click **Start**
+
+Sideloadly will sign the app with your free developer certificate and push it to your iPhone. The process takes about 30 seconds.
+
+**5. Trust the developer certificate on your iPhone**
+
+After installation, iOS will block the app until you trust the certificate:
+
+1. On iPhone: **Settings → General → VPN & Device Management**
+2. Tap your Apple ID under *Developer App*
+3. Tap **Trust** → confirm
+
+The app is now launchable.
+
+**6. Re-signing after 7 days**
+
+Free Apple ID certificates expire after 7 days. When the app stops launching:
+
+1. Repeat steps 4–5 with the same `.ipa`
+2. Sideloadly → **Settings** → enable *Auto re-sign* to be notified before expiry
+
+### Upgrading to a new release
+
+Download the new `stream-unsigned.ipa` from the latest release and repeat step 4. Sideloadly overwrites the existing installation and preserves app data.
 
 ---
 
