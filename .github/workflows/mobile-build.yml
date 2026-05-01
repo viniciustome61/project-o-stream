@@ -43,13 +43,8 @@ jobs:
       - name: Analyze
         run: flutter analyze
 
-      - name: Build debug AAB
-        working-directory: android
-        run: ./gradlew bundleDebug
-
       - name: Build debug APK
-        working-directory: android
-        run: ./gradlew assembleDebug
+        run: flutter build apk --debug
 
       - name: List Android outputs
         if: always()
