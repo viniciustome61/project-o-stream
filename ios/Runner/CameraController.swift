@@ -31,7 +31,7 @@ final class CameraController: NSObject {
         )
         try await mixer.attachAudio(AVCaptureDevice.default(for: .audio), track: 0)
 
-        try stream.setVideoSettings(VideoCodecSettings(
+        try await stream.setVideoSettings(VideoCodecSettings(
             videoSize: CGSize(width: 3840, height: 2160),
             bitRate: 12 * 1_000_000,
             profileLevel: kVTProfileLevel_H264_High_AutoLevel as String
@@ -63,7 +63,7 @@ final class CameraController: NSObject {
         let height = profile?["height"] as? Int ?? 2160
         let bitrate = profile?["bitrate"] as? Int ?? 12_000_000
 
-        try stream.setVideoSettings(VideoCodecSettings(
+        try await stream.setVideoSettings(VideoCodecSettings(
             videoSize: CGSize(width: CGFloat(width), height: CGFloat(height)),
             bitRate: bitrate,
             profileLevel: kVTProfileLevel_H264_High_AutoLevel as String
