@@ -5,7 +5,8 @@
 The canonical Flutter project root is the repository root. `codemagic.yaml`
 builds from this root and should be the preferred workflow. Android's Gradle
 configuration selects the Flutter source directory from the available
-`.dart_tool/package_config.json`. `mobile/build` is a symlink to `../build`, so
+`.dart_tool/package_config.json` and creates the root `build/` directory before
+Flutter's Gradle compile task. `mobile/build` is a symlink to `../build`, so
 Flutter can find Android artifacts from either launch directory.
 
 Codemagic's older UI workflow for this project may still run from `mobile/`.

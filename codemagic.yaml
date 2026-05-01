@@ -9,7 +9,9 @@ workflows:
         - project_o_keystore
     scripts:
       - name: Get dependencies
-        script: flutter pub get
+        script: |
+          mkdir -p build
+          flutter pub get
       - name: Build AAB
         script: flutter build appbundle --release
     artifacts:
@@ -27,7 +29,9 @@ workflows:
       flutter: 3.41.8
     scripts:
       - name: Get dependencies
-        script: flutter pub get
+        script: |
+          mkdir -p build
+          flutter pub get
       - name: Build debug APK
         script: flutter build apk --debug
     artifacts:

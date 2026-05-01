@@ -86,6 +86,14 @@ tasks.matching { it.name.startsWith('generate') && it.name.contains('PluginRegis
 tasks.matching { it.name.startsWith('compile') }.configureEach {
     dependsOn tasks.named('deleteStaleFlutterRegistrant')
 }
+tasks.register('prepareFlutterBuildDirectory') {
+    doLast {
+        new File(repoFlutterRoot, 'build').mkdirs()
+    }
+}
+tasks.matching { it.name.startsWith('compileFlutterBuild') }.configureEach {
+    dependsOn tasks.named('prepareFlutterBuildDirectory')
+}
 
 repositories {
     google()
