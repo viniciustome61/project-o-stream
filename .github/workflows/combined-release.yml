@@ -2,9 +2,14 @@ name: Combined Release Build
 
 on:
   push:
-    branches:
-      - desktop/tauri-svelte
+    tags:
+      - 'v*'
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v0.3.0)'
+        required: false
+        default: ''
 
 jobs:
   flutter-android:
@@ -79,3 +84,52 @@ jobs:
         with:
           name: tauri-windows-debug
           path: desktop/src-tauri/target/debug/bundle/msi/*.msi
+
+  github-release:
+    name: Create GitHub Release
+    needs: [flutter-android, flutter-ios, tauri-desktop]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Android APK
+        uses: actions/download-artifact@v4
+        with:
+          name: flutter-android-debug
+          path: dist/android
+
+      - name: Download iOS Simulator
+        uses: actions/download-artifact@v4
+        with:
+          name: flutter-ios-simulator
+          path: dist/ios
+
+      - name: Download Windows MSI
+        uses: actions/download-artifact@v4
+        with:
+          name: tauri-windows-debug
+          path: dist/windows
+
+      - name: Determine tag name
+        id: tag
+        run: |
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            echo "name=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          name: Release ${{ steps.tag.outputs.name }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            dist/android/*.apk
+            dist/ios/*.zip
+            dist/windows/*.msi
