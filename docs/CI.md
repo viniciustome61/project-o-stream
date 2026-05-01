@@ -12,7 +12,8 @@ root on push, pull request, and manual dispatch.
 
 ### iOS Job
 - Runs on `macos-15`.
-- Produces an unsigned simulator `Runner.app`.
+- Produces an unsigned device `stream-unsigned.ipa`.
+- The app uses camera/SRT native code, so CI builds the physical-device iOS target instead of the simulator target.
 - **Note:** App Store/TestFlight distribution requires signing secrets (p12/provisioning profiles) and export options which are not currently configured in the GitHub workflow.
 
 ## Repository Structure for CI
