@@ -13,10 +13,16 @@ final class CameraController: NSObject {
     private lazy var mixer = MediaMixer()
     private lazy var hkView = MTHKView(frame: .zero)
     private var cameraPosition: AVCaptureDevice.Position = .back
+    private var configured = false
     private var streaming = false
 
     func configure() async throws {
-        print("[PO] configure() start — requesting camera permission")
+        print("[PO] configure() start - requesting camera permission")
+        if configured {
+            print("[PO] configure() skipped - camera already configured")
+            return
+        }
+
         let camOK = await AVCaptureDevice.requestAccess(for: .video)
         print("[PO] camera permission: \(camOK)")
         guard camOK else {
@@ -53,16 +59,20 @@ final class CameraController: NSObject {
             : previewView.bounds
         print("[PO] hkView initial frame: \(initialFrame)  previewView.bounds: \(previewView.bounds)")
         hkView.frame = initialFrame
-        previewView.addSubview(hkView)
-        hkView.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            hkView.topAnchor.constraint(equalTo: previewView.topAnchor),
-            hkView.bottomAnchor.constraint(equalTo: previewView.bottomAnchor),
-            hkView.leadingAnchor.constraint(equalTo: previewView.leadingAnchor),
-            hkView.trailingAnchor.constraint(equalTo: previewView.trailingAnchor),
-        ])
+        if hkView.superview !== previewView {
+            hkView.removeFromSuperview()
+            previewView.addSubview(hkView)
+            hkView.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([
+                hkView.topAnchor.constraint(equalTo: previewView.topAnchor),
+                hkView.bottomAnchor.constraint(equalTo: previewView.bottomAnchor),
+                hkView.leadingAnchor.constraint(equalTo: previewView.leadingAnchor),
+                hkView.trailingAnchor.constraint(equalTo: previewView.trailingAnchor),
+            ])
+        }
         previewView.layoutIfNeeded()
-        print("[PO] configure() complete — hkView.frame after layout: \(hkView.frame)")
+        configured = true
+        print("[PO] configure() complete - hkView.frame after layout: \(hkView.frame)")
     }
 
     func startPreview() async throws {
@@ -135,6 +145,23 @@ final class CameraController: NSObject {
 }
 
 final class PreviewHostView: UIView {
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        configureView()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        configureView()
+    }
+
+    private func configureView() {
+        backgroundColor = .black
+        clipsToBounds = true
+        isOpaque = true
+        isUserInteractionEnabled = false
+    }
+
     override func layoutSubviews() {
         super.layoutSubviews()
         // Keep Metal sublayers in sync when Flutter resizes this view.

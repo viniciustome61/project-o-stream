@@ -194,6 +194,7 @@ class _SenderScreenState extends State<SenderScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      backgroundColor: Colors.transparent,
       body: Stack(
         children: [
           const Positioned.fill(child: NativePreview()),
@@ -375,7 +376,7 @@ class NativePreview extends StatelessWidget {
       case TargetPlatform.android:
         return const AndroidView(viewType: 'project_o_stream/preview');
       case TargetPlatform.iOS:
-        return const UiKitView(viewType: 'project_o_stream/preview');
+        return const SizedBox.expand();
       default:
         return const ColoredBox(color: Colors.black);
     }

@@ -3,18 +3,60 @@ import Flutter
 import UIKit
 
 @UIApplicationMain
-class AppDelegate: FlutterAppDelegate, FlutterStreamHandler {
+class AppDelegate: FlutterAppDelegate, FlutterStreamHandler, FlutterImplicitEngineDelegate {
     let camera = CameraController()
     var eventSink: FlutterEventSink?
+    private var methodChannel: FlutterMethodChannel?
+    private var eventChannel: FlutterEventChannel?
+    private var nativeBridgeRegistered = false
 
     override func application(
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
     ) -> Bool {
-        GeneratedPluginRegistrant.register(with: self)
         return super.application(application, didFinishLaunchingWithOptions: launchOptions)
-        // Channel/plugin-view setup is in SceneDelegate.scene(_:willConnectTo:options:)
-        // because AppDelegate.window is always nil in UIScene lifecycle (iOS 13+).
+    }
+
+    func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
+        print("[PO] implicit Flutter engine initialized")
+        GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
+        registerNativeBridge(messenger: engineBridge.applicationRegistrar.messenger())
+    }
+
+    func registerNativeBridge(messenger: FlutterBinaryMessenger) {
+        guard !nativeBridgeRegistered else { return }
+        nativeBridgeRegistered = true
+
+        print("[PO] registering native method/event channels")
+        let methods = FlutterMethodChannel(name: "project_o_stream/native", binaryMessenger: messenger)
+        methods.setMethodCallHandler { [weak self] call, result in
+            print("[PO] MethodChannel call: \(call.method)")
+            self?.handle(call: call, result: result)
+        }
+        methodChannel = methods
+
+        let events = FlutterEventChannel(name: "project_o_stream/events", binaryMessenger: messenger)
+        events.setStreamHandler(self)
+        eventChannel = events
+    }
+
+    func installPreviewBehindFlutter(in window: UIWindow, below flutterView: UIView) {
+        let preview = camera.previewView
+        let container = flutterView.superview ?? window
+
+        preview.isUserInteractionEnabled = false
+        preview.frame = container.bounds
+        preview.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        preview.translatesAutoresizingMaskIntoConstraints = true
+
+        if preview.superview !== container {
+            preview.removeFromSuperview()
+            container.insertSubview(preview, belowSubview: flutterView)
+        } else {
+            container.insertSubview(preview, belowSubview: flutterView)
+        }
+
+        print("[PO] native preview installed behind Flutter. frame=\(preview.frame)")
     }
 
     func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
