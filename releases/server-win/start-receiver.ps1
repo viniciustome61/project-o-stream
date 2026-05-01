@@ -77,7 +77,7 @@ try {
             $out = Receive-Job $discoveryJob -ErrorAction SilentlyContinue
             Write-Host ""
             if ($out) { $out | Where-Object { $_ } | ForEach-Object { Write-Host $_ } }
-            Write-Host "[Receiver] Discovery server stopped — halting receiver."
+            Write-Host "[Receiver] Discovery server stopped - halting receiver."
             if (-not $proc.HasExited) { $proc.Kill() }
             break
         }

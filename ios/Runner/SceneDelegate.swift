@@ -1,31 +1,14 @@
-import Flutter
 import UIKit
+import Flutter
 
-class SceneDelegate: FlutterSceneDelegate {
-    override func scene(
-        _ scene: UIScene,
-        willConnectTo session: UISceneSession,
-        options connectionOptions: UIScene.ConnectionOptions
-    ) {
-        print("[PO] SceneDelegate.scene willConnectTo - calling super")
-        super.scene(scene, willConnectTo: session, options: connectionOptions)
-        print("[PO] super returned. self.window=\(String(describing: self.window))")
+@objc class SceneDelegate: UIResponder, UIWindowSceneDelegate {
+    var window: UIWindow?
 
-        let rootWindow = self.window
-            ?? (scene as? UIWindowScene)?.windows.first(where: { $0.isKeyWindow })
-            ?? (scene as? UIWindowScene)?.windows.first
-
-        print("[PO] rootWindow=\(String(describing: rootWindow))")
-        print("[PO] rootVC=\(String(describing: rootWindow?.rootViewController))")
-
-        guard let window = rootWindow,
-              let controller = window.rootViewController as? FlutterViewController,
-              let appDelegate = UIApplication.shared.delegate as? AppDelegate else {
-            print("[PO] GUARD FAILED - rootVC type: \(type(of: rootWindow?.rootViewController))")
-            return
-        }
-
-        print("[PO] FlutterViewController found - delegating native surface install")
-        appDelegate.installNativeSurface(in: window, controller: controller)
+    func scene(_ scene: UIScene, willConnectTo session: UISceneSession, options connectionOptions: UIScene.ConnectionOptions) {
+        guard let windowScene = (scene as? UIWindowScene) else { return }
+        
+        let window = UIWindow(windowScene: windowScene)
+        self.window = window
+        window.makeKeyAndVisible()
     }
 }
