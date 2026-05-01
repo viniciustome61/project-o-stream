@@ -3,44 +3,24 @@
 ## GitHub Actions
 
 `.github/workflows/mobile-build.yml` builds the Flutter app from the repository
-root on push, pull request, and manual dispatch. The Android job produces debug
-APK artifacts. The iOS job runs on macOS and produces an unsigned simulator
-`Runner.app`; App Store/TestFlight distribution still requires signing secrets
-and export options.
+root on push, pull request, and manual dispatch. 
 
-## Codemagic
+### Android Job
+- Runs on `ubuntu-latest`.
+- Produces debug APK artifacts.
+- Automatically uploaded as workflow artifacts.
 
-The canonical Flutter project root is the repository root. `codemagic.yaml`
-builds from this root and should be the preferred workflow. Android's Gradle
-configuration always uses the repository root as Flutter's source directory,
-creates the root `build/` directory before Flutter's Gradle compile task, and
-copies `.dart_tool` metadata from `mobile/` when a legacy workflow runs
-`flutter pub get` from there.
+### iOS Job
+- Runs on `macos-15`.
+- Produces an unsigned simulator `Runner.app`.
+- **Note:** App Store/TestFlight distribution requires signing secrets (p12/provisioning profiles) and export options which are not currently configured in the GitHub workflow.
 
-Codemagic's older UI workflow for this project may still run from `mobile/`.
-To keep that workflow buildable without duplicating source, `mobile/` contains
-Git symlinks to the root Flutter project:
+## Repository Structure for CI
 
-```text
-mobile/pubspec.yaml -> ../pubspec.yaml
-mobile/pubspec.lock -> ../pubspec.lock
-mobile/lib          -> ../lib
-mobile/android      -> ../android
-mobile/ios          -> ../ios
-```
+The canonical Flutter project root is the repository root. All CI tasks should run from the root directory.
 
-On Windows checkouts without symlink support, these entries can appear as tiny
-text files. Do not edit them as normal source files. On Codemagic they resolve
-as symlinks.
+## Android Build Configuration
 
-## Android Build Hardening
+The Android project intentionally does not use `dependencyResolutionManagement` because Flutter injects a local engine Maven repository at project level. Project-level repositories are required so Gradle can resolve both Flutter engine artifacts and regular dependencies from Google/Maven Central.
 
-The Android project intentionally does not use `dependencyResolutionManagement`
-because Flutter injects a local engine Maven repository at project level.
-Project-level repositories are required so Gradle can resolve both Flutter
-engine artifacts and regular dependencies from Google/Maven Central.
-
-Debug and release builds explicitly disable resource shrinking while
-minification is disabled. Release signing is activated only when all Codemagic
-`CM_KEYSTORE_*` variables are present, so debug builds do not fail on missing
-keystore secrets.
+Debug builds explicitly disable resource shrinking and minification for faster turnaround. Release signing is currently disabled in the main workflow until secrets are provisioned.

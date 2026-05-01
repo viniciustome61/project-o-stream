@@ -2,7 +2,16 @@
 
 > **Send your phone camera to OBS in real-time — hardware-encoded, over a private Tailscale network, with zero IP configuration.**
 
-Project O Stream is a production-grade native mobile camera ingest stack for OBS Studio. It captures video and audio directly from an Android or iOS device using the hardware encoder, transmits it over SRT on your private Tailscale network, and presents it to OBS as a local UDP media source — all without punching holes in firewalls or typing a single IP address.
+---
+
+## 📥 Downloads
+
+| Platform | Build Type | Link |
+| --- | --- | --- |
+| **Android** | Debug APK | [v0.1.0-android-debug.apk](https://github.com/TeusDev/project-o-stream/releases/download/v0.1.0/project-o-stream-v0.1.0-android-debug.apk) |
+| **iOS** | Simulator Zip | [v0.1.0-ios-simulator-debug.zip](https://github.com/TeusDev/project-o-stream/releases/download/v0.1.0/project-o-stream-v0.1.0-ios-simulator-debug.zip) |
+
+*Note: The iOS build is for **simulators only**. To run on a physical iPhone, follow the [iOS Build](#ios-build) instructions.*
 
 ---
 
@@ -82,7 +91,29 @@ Both peers detect each other and both exit. Only restart one.
 ```
 project-o-stream/                ← Flutter project root (pubspec.yaml here)
 │
+├── desktop/                     Tauri 2 + SvelteKit Desktop App
+│   ├── src/                     Svelte frontend (Tailwind CSS)
+│   └── src-tauri/               Rust backend
+│
 ├── lib/                         Dart source
+...
+## Desktop Controller (Refactor)
+
+The `desktop/` directory contains a modern desktop application built with **Tauri 2** and **SvelteKit**. It provides a sleek, glassmorphism UI to manage the receiver and OBS integration.
+
+### Development
+
+```bash
+cd desktop
+npm install
+npm run tauri dev
+```
+
+### Stack
+- **Framework**: SvelteKit
+- **Runtime**: Tauri 2 (Rust)
+- **Styling**: Tailwind CSS
+- **Visuals**: Glassmorphism, Dark Mode, Framer-motion-like Svelte transitions.
 │   ├── main.dart                UI — camera preview, stream controls, settings
 │   ├── discovery.dart           Zero-input receiver discovery (UDP)
 │   ├── native_streamer.dart     Flutter ↔ native method/event channel bridge
@@ -123,7 +154,6 @@ project-o-stream/                ← Flutter project root (pubspec.yaml here)
 │   └── DEPLOYMENT.md
 │
 ├── pubspec.yaml
-├── codemagic.yaml
 └── vendor/obs-portable/         OBS runtime — NOT in git (user provides)
 ```
 
@@ -294,36 +324,35 @@ Additional toggles per session:
 
 ## Mobile Build
 
-Codemagic should use `codemagic.yaml` from the repository root. A `mobile/`
-symlink compatibility path is present only for Codemagic UI workflows that still
-run from `/clone/mobile`.
+Builds are automatically triggered on every push to `main` via **GitHub Actions**.
 
-### Android
+### Automated Downloads
+The latest successful build artifacts can be found in the [GitHub Releases](https://github.com/TeusDev/project-o-stream/releases) page.
+
+### Local Build (Android)
 
 ```powershell
 flutter pub get
 flutter run          # deploy to connected device
 # or
-flutter build apk --release
+flutter build apk --debug
 ```
 
-Android streaming uses **StreamPack 3.1.2** (`io.github.thibaultbee.streampack`), which drives the device's hardware encoder and SRT output natively. No extra native libraries needed.
+Android streaming uses **StreamPack 3.1.2** (`io.github.thibaultbee.streampack`), which drives the device's hardware encoder and SRT output natively.
 
 Minimum SDK: Android 8.0 (API 26).
 Target SDK: 35.
 
-### iOS Build
+### Local Build (iOS)
 
-iOS build requires **macOS with Xcode 14+**. The Xcode project is included in the repo — no `flutter create` needed.
+iOS build requires **macOS with Xcode 15+**.
 
 ```bash
 flutter pub get                  # generates Flutter/Generated.xcconfig
 cd ios
 pod install
-open Runner.xcworkspace          # open in Xcode — do NOT open .xcodeproj directly
+open Runner.xcworkspace          # open in Xcode
 ```
-
-Then in Xcode: select your device → Build & Run (`⌘R`).
 
 > **SRT streaming on iOS requires `libsrt.xcframework`.**
 > The camera preview, discovery, and UI all work immediately. To enable actual video streaming:
@@ -390,7 +419,7 @@ Requirements on the target machine: **Tailscale** + **ffmpeg in PATH** (or ffmpe
 | Doc                                           | Contents                                                  |
 | --------------------------------------------- | --------------------------------------------------------- |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Component map, media path, design rules                   |
-| [`docs/CI.md`](docs/CI.md)                     | Codemagic workflow and Android CI build notes             |
+| [`docs/CI.md`](docs/CI.md)                     | GitHub Actions workflow and mobile build notes            |
 | [`docs/PROTOCOL.md`](docs/PROTOCOL.md)         | SRT parameters, discovery payload schema, OBS integration |
 | [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)     | Step-by-step deployment for workstation and mobile        |
 

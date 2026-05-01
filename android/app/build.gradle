@@ -32,21 +32,9 @@ android {
         }
     }
 
-    def cmKeystorePath = System.getenv('CM_KEYSTORE_PATH')
-    def hasCodemagicSigning = cmKeystorePath != null &&
-            !cmKeystorePath.isBlank() &&
-            System.getenv('CM_KEYSTORE_PASSWORD') != null &&
-            System.getenv('CM_KEY_ALIAS') != null &&
-            System.getenv('CM_KEY_PASSWORD') != null
-
     signingConfigs {
         release {
-            if (hasCodemagicSigning) {
-                storeFile file(cmKeystorePath)
-                storePassword System.getenv('CM_KEYSTORE_PASSWORD')
-                keyAlias System.getenv('CM_KEY_ALIAS')
-                keyPassword System.getenv('CM_KEY_PASSWORD')
-            }
+            // Signing secrets should be provisioned via GitHub Actions Secrets or local properties
         }
     }
 
@@ -57,9 +45,6 @@ android {
         }
 
         release {
-            if (hasCodemagicSigning) {
-                signingConfig signingConfigs.release
-            }
             minifyEnabled false
             shrinkResources false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
@@ -67,43 +52,16 @@ android {
     }
 }
 
-def staleFlutterRegistrant = layout.projectDirectory.file('src/main/java/io/flutter/plugins/GeneratedPluginRegistrant.java')
 def repoFlutterRoot = file('../..')
-def mobileFlutterRoot = file('../../mobile')
-def rootPackageConfig = file('../../.dart_tool/package_config.json')
-def mobilePackageConfig = file('../../mobile/.dart_tool/package_config.json')
 
-tasks.register('deleteStaleFlutterRegistrant') {
-    doLast {
-        staleFlutterRegistrant.asFile.delete()
-    }
-}
-tasks.matching { it.name.startsWith('generate') && it.name.contains('PluginRegistrant') }.configureEach {
-    tasks.named('deleteStaleFlutterRegistrant').configure {
-        mustRunAfter it
-    }
-}
-tasks.matching { it.name.startsWith('compile') }.configureEach {
-    dependsOn tasks.named('deleteStaleFlutterRegistrant')
-}
 tasks.register('prepareFlutterBuildDirectory') {
     doLast {
         new File(repoFlutterRoot, 'build').mkdirs()
     }
 }
-tasks.register('prepareFlutterPackageConfig') {
-    doLast {
-        if (!rootPackageConfig.exists() && mobilePackageConfig.exists()) {
-            copy {
-                from new File(mobileFlutterRoot, '.dart_tool')
-                into new File(repoFlutterRoot, '.dart_tool')
-            }
-        }
-    }
-}
+
 tasks.matching { it.name.startsWith('compileFlutterBuild') }.configureEach {
     dependsOn tasks.named('prepareFlutterBuildDirectory')
-    dependsOn tasks.named('prepareFlutterPackageConfig')
 }
 
 repositories {
