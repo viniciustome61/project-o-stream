@@ -3,7 +3,7 @@ name: Combined Release Build
 on:
   push:
     branches:
-      - refactor/tauri-svelte
+      - desktop/tauri-svelte
   workflow_dispatch:
 
 jobs:
