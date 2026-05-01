@@ -5,6 +5,11 @@
 `.github/workflows/mobile-build.yml` builds the Flutter app from the repository
 root on push, pull request, and manual dispatch. 
 
+`.github/workflows/combined-release.yml` builds release artifacts from the pushed
+`v*` tag, or from the explicit tag supplied through manual dispatch. Manual
+release runs require a tag so the workflow cannot accidentally publish a release
+from `main`.
+
 ### Android Job
 - Runs on `ubuntu-latest`.
 - Produces debug APK artifacts.
