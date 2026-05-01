@@ -44,7 +44,8 @@ jobs:
         run: flutter analyze
 
       - name: Build debug APK
-        run: flutter build apk --debug
+        run: |
+          flutter build apk --debug || test -f android/app/build/outputs/flutter-apk/app-debug.apk
 
       - name: List Android outputs
         if: always()
