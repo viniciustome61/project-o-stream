@@ -3,7 +3,6 @@ import UIKit
 
 @MainActor
 class SimpleCameraPreview: NSObject {
-    let previewView = PreviewHostView()
     private let captureSession = AVCaptureSession()
     private let captureQueue = DispatchQueue(label: "project_o_stream.preview")
     private var activeVideoInput: AVCaptureDeviceInput?
@@ -22,10 +21,6 @@ class SimpleCameraPreview: NSObject {
         captureSession.sessionPreset = .hd1920x1080
         try installVideoInput(position: cameraPosition)
         captureSession.commitConfiguration()
-
-        previewView.attach(session: captureSession)
-        previewView.previewLayer.videoGravity = .resizeAspectFill
-        previewView.layoutIfNeeded()
         print("[PO] SimpleCameraPreview configured")
     }
 
@@ -36,6 +31,7 @@ class SimpleCameraPreview: NSObject {
         captureQueue.async {
             if !session.isRunning {
                 session.startRunning()
+                print("[PO] Preview started")
             }
         }
     }
@@ -46,6 +42,7 @@ class SimpleCameraPreview: NSObject {
         captureQueue.async {
             if session.isRunning {
                 session.stopRunning()
+                print("[PO] Preview stopped")
             }
         }
     }
