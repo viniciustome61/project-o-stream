@@ -350,6 +350,17 @@ Builds are automatically triggered on every push to `main` via **GitHub Actions*
 ### Automated Downloads
 The latest successful build artifacts can be found in the [GitHub Releases](https://github.com/TeusDev/project-o-stream/releases) page.
 
+### Ship Script (Windows/macOS/Linux)
+
+Use `ship.py` to push your latest changes, trigger the iOS CI build, download the unsigned IPA, and save it in `releases/` using the app display name from `ios/Runner/Info.plist`.
+
+```bash
+# from repo root
+python ship.py
+```
+
+Set `GITHUB_TOKEN` (or `GH_TOKEN`) before running. The token needs repo + Actions permissions.
+
 ### Local Build (Android)
 
 ```powershell
