@@ -35,13 +35,23 @@ jobs:
         working-directory: ios
         run: pod install
 
-      - name: Build iOS device app (release, unsigned)
-        run: flutter build ios --release --no-codesign
+      - name: Build iOS device app (release, unsigned) with Xcode
+        working-directory: ios
+        run: |
+          xcodebuild build \
+            -workspace Runner.xcworkspace \
+            -scheme Runner \
+            -configuration Release \
+            -derivedDataPath build \
+            -arch arm64 \
+            -allowProvisioningUpdates \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO
 
       - name: Package unsigned release IPA
         run: |
           mkdir -p Payload
-          cp -r build/ios/iphoneos/Runner.app Payload/
+          cp -r ios/build/Release-iphoneos/Runner.app Payload/
           zip -r stream-unsigned.ipa Payload
 
       - name: Upload iOS artifact

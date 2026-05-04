@@ -55,10 +55,15 @@ class AppDelegate: FlutterAppDelegate, FlutterStreamHandler, FlutterImplicitEngi
         if let camera {
             return camera
         }
-        let camera = CameraController()
-        self.camera = camera
-        print("[PO] CameraController initialized")
-        return camera
+        do {
+            let camera = CameraController()
+            self.camera = camera
+            print("[PO] CameraController initialized")
+            return camera
+        } catch {
+            print("[PO] CameraController init failed: \(error)")
+            throw error
+        }
     }
 
     private func installNativeBridgeWhenFlutterViewIsReady() {
@@ -166,9 +171,15 @@ class AppDelegate: FlutterAppDelegate, FlutterStreamHandler, FlutterImplicitEngi
                     updateBootOverlay("flutter frame rendered")
                     result(nil)
                 case "startPreview":
-                    try await nativeCamera().startPreview()
-                    send(status: "Preview", live: false)
-                    result(nil)
+                    print("[PO] startPreview() called")
+                    do {
+                        try await nativeCamera().startPreview()
+                        send(status: "Preview", live: false)
+                        result(nil)
+                    } catch {
+                        print("[PO] startPreview() failed: \(error)")
+                        throw error
+                    }
                 case "stopPreview":
                     camera?.stop()
                     send(status: "Preview stopped", live: false)
