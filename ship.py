@@ -74,7 +74,7 @@ def github_request(
 
     body = None
     headers = {
-        "Authorization": f"Bearer {token}",
+        "Authorization": f"token {token}",
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
     }
@@ -165,9 +165,7 @@ def wait_for_run_success(
     raise TimeoutError(f"Timed out waiting for workflow run {run_id} to finish.")
 
 
-def get_ios_artifact_download_url(
-    token: str, owner: str, repo: str, run_id: int, artifact_name: str
-) -> str:
+def get_ios_artifact_id(token: str, owner: str, repo: str, run_id: int, artifact_name: str) -> int:
     path = f"/repos/{owner}/{repo}/actions/runs/{run_id}/artifacts"
     data = github_request(token, "GET", path, expected_status={200})
     assert isinstance(data, dict)
@@ -177,7 +175,7 @@ def get_ios_artifact_download_url(
 
     for artifact in artifacts:
         if artifact.get("name") == artifact_name:
-            return artifact["archive_download_url"]
+            return int(artifact["id"])
     raise RuntimeError(f"Artifact '{artifact_name}' was not found in workflow run {run_id}.")
 
 
@@ -193,10 +191,21 @@ def sanitize_file_stem(name: str) -> str:
     return stem or "app"
 
 
-def download_and_extract_ipa(token: str, archive_url: str, output_path: Path) -> None:
-    archive_data = github_request(
-        token, "GET", archive_url, expected_status={200, 302}, raw=True
-    )
+def download_and_extract_ipa(
+    token: str, owner: str, repo: str, artifact_id: int, output_path: Path
+) -> None:
+    artifact_zip_path = f"/repos/{owner}/{repo}/actions/artifacts/{artifact_id}/zip"
+    try:
+        archive_data = github_request(
+            token, "GET", artifact_zip_path, expected_status={200, 302}, raw=True
+        )
+    except urllib.error.HTTPError as exc:
+        if exc.code in {401, 403}:
+            raise RuntimeError(
+                "Cannot download workflow artifact (401/403). "
+                "Your token needs Actions read permission for this repository."
+            ) from exc
+        raise
     assert isinstance(archive_data, bytes)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -310,7 +319,7 @@ def main() -> int:
     )
 
     print("[ship] Downloading IPA artifact...")
-    archive_url = get_ios_artifact_download_url(
+    artifact_id = get_ios_artifact_id(
         token=token,
         owner=owner,
         repo=repo,
@@ -320,7 +329,7 @@ def main() -> int:
 
     app_name = sanitize_file_stem(get_app_display_name())
     output_path = REPO_ROOT / "releases" / f"{app_name}-unsigned.ipa"
-    download_and_extract_ipa(token, archive_url, output_path)
+    download_and_extract_ipa(token, owner, repo, artifact_id, output_path)
     print(f"[ship] IPA saved to: {output_path}")
     return 0
 
