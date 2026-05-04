@@ -47,6 +47,76 @@ class SimpleCameraPreview: NSObject {
         }
     }
 
+    // Stub methods to match CameraController interface
+    // These are called by AppDelegate but SimpleCameraPreview is lightweight boot version
+    
+    func startStream(config: [String: Any]) async throws {
+        print("[PO] SimpleCameraPreview.startStream() - SRT streaming not available in boot preview")
+        // No-op: SimpleCameraPreview doesn't support SRT streaming
+    }
+
+    func stopStream() {
+        print("[PO] SimpleCameraPreview.stopStream()")
+        // No-op: SimpleCameraPreview doesn't support SRT streaming
+    }
+
+    func switchCamera() async throws {
+        print("[PO] SimpleCameraPreview.switchCamera()")
+        cameraPosition = (cameraPosition == .back) ? .front : .back
+        do {
+            captureSession.beginConfiguration()
+            // Remove current input
+            if let currentInput = activeVideoInput {
+                captureSession.removeInput(currentInput)
+            }
+            try installVideoInput(position: cameraPosition)
+            captureSession.commitConfiguration()
+        } catch {
+            print("[PO] Camera switch failed: \(error)")
+            throw error
+        }
+    }
+
+    func setTorch(_ enabled: Bool) async throws {
+        print("[PO] SimpleCameraPreview.setTorch(\(enabled))")
+        guard let device = activeVideoInput?.device else {
+            throw NSError(domain: "ProjectOStream", code: 4,
+                          userInfo: [NSLocalizedDescriptionKey: "No active camera device"])
+        }
+        
+        guard device.hasTorch else {
+            throw NSError(domain: "ProjectOStream", code: 5,
+                          userInfo: [NSLocalizedDescriptionKey: "Torch not available"])
+        }
+        
+        do {
+            try device.lockForConfiguration()
+            device.torchMode = enabled ? .on : .off
+            device.unlockForConfiguration()
+        } catch {
+            print("[PO] Torch control failed: \(error)")
+            throw error
+        }
+    }
+
+    func setZoom(_ value: Double) async throws {
+        print("[PO] SimpleCameraPreview.setZoom(\(value))")
+        guard let device = activeVideoInput?.device else {
+            throw NSError(domain: "ProjectOStream", code: 4,
+                          userInfo: [NSLocalizedDescriptionKey: "No active camera device"])
+        }
+        
+        do {
+            try device.lockForConfiguration()
+            let clampedZoom = max(1.0, min(value, device.activeFormat.videoMaxZoomFactor))
+            device.videoZoomFactor = clampedZoom
+            device.unlockForConfiguration()
+        } catch {
+            print("[PO] Zoom control failed: \(error)")
+            throw error
+        }
+    }
+
     private func installVideoInput(position: AVCaptureDevice.Position) throws {
         guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position) else {
             throw NSError(domain: "ProjectOStream", code: 2,

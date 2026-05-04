@@ -8,7 +8,7 @@ class AppDelegate: FlutterAppDelegate, FlutterStreamHandler, FlutterImplicitEngi
     private var methodChannel: FlutterMethodChannel?
     private var eventChannel: FlutterEventChannel?
     private var nativeBridgeRegistered = false
-    private var camera: CameraController?
+    private var camera: SimpleCameraPreview?
     private var bootOverlay: UIView?
     private weak var bootOverlayLabel: UILabel?
 
@@ -52,18 +52,13 @@ class AppDelegate: FlutterAppDelegate, FlutterStreamHandler, FlutterImplicitEngi
 
     @MainActor
     private func nativeCamera() -> SimpleCameraPreview {
-        if let camera = camera as? SimpleCameraPreview {
+        if let camera = camera {
             return camera
         }
-        do {
-            let camera = SimpleCameraPreview()
-            self.camera = camera
-            print("[PO] SimpleCameraPreview initialized")
-            return camera
-        } catch {
-            print("[PO] Camera init failed: \(error)")
-            throw error
-        }
+        let camera = SimpleCameraPreview()
+        self.camera = camera
+        print("[PO] SimpleCameraPreview initialized")
+        return camera
     }
 
     private func installNativeBridgeWhenFlutterViewIsReady() {
