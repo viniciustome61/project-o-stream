@@ -37,31 +37,31 @@ jobs:
 
       - name: Build iOS device app (release, unsigned)
         run: |
-          # First, prepare the Flutter build
-          flutter build ios --release --no-codesign --verbose 2>&1 | tail -20
-          
-      - name: Complete iOS build with xcodebuild
-        working-directory: ios
-        run: |
-          # Use xcodebuild to ensure complete build with asset catalog compilation
-          # CODE_SIGN_IDENTITY="" skips code signing but completes the build
+          # Use xcodebuild directly with configuration to ensure Assets.car is compiled
+          cd ios
           xcodebuild -workspace Runner.xcworkspace \
             -scheme Runner \
             -configuration Release \
             -derivedDataPath build/DerivedData \
+            -destination 'generic/platform=iOS' \
             -arch arm64 \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
-            2>&1 | tail -50
+            ONLY_ACTIVE_ARCH=NO \
+            2>&1 | tail -100
 
       - name: Package unsigned release IPA
         run: |
           mkdir -p Payload
-          # Use the app from xcodebuild DerivedData if available, otherwise use flutter build
+          # Use the properly built app from xcodebuild
           if [ -d "ios/build/DerivedData/Build/Products/Release-iphoneos/Runner.app" ]; then
             cp -r ios/build/DerivedData/Build/Products/Release-iphoneos/Runner.app Payload/
-          else
+          elif [ -d "build/ios/iphoneos/Runner.app" ]; then
             cp -r build/ios/iphoneos/Runner.app Payload/
+          else
+            echo "ERROR: Could not find Runner.app in build output"
+            find . -name "Runner.app" -type d 2>/dev/null | head -5
+            exit 1
           fi
           zip -r stream-unsigned.ipa Payload
 
