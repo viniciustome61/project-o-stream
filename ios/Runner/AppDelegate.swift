@@ -51,17 +51,17 @@ class AppDelegate: FlutterAppDelegate, FlutterStreamHandler, FlutterImplicitEngi
     }
 
     @MainActor
-    private func nativeCamera() -> CameraController {
-        if let camera {
+    private func nativeCamera() -> SimpleCameraPreview {
+        if let camera = camera as? SimpleCameraPreview {
             return camera
         }
         do {
-            let camera = CameraController()
+            let camera = SimpleCameraPreview()
             self.camera = camera
-            print("[PO] CameraController initialized")
+            print("[PO] SimpleCameraPreview initialized")
             return camera
         } catch {
-            print("[PO] CameraController init failed: \(error)")
+            print("[PO] Camera init failed: \(error)")
             throw error
         }
     }
