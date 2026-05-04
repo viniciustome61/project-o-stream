@@ -19,7 +19,9 @@ class AppDelegate: FlutterAppDelegate, FlutterStreamHandler, FlutterImplicitEngi
         GeneratedPluginRegistrant.register(with: self)
 
         let launched = super.application(application, didFinishLaunchingWithOptions: launchOptions)
-        installNativeBridgeWhenFlutterViewIsReady()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.installNativeBridgeWhenFlutterViewIsReady()
+        }
         return launched
     }
 
@@ -55,6 +57,7 @@ class AppDelegate: FlutterAppDelegate, FlutterStreamHandler, FlutterImplicitEngi
         }
         let camera = CameraController()
         self.camera = camera
+        print("[PO] CameraController initialized")
         return camera
     }
 
@@ -149,9 +152,15 @@ class AppDelegate: FlutterAppDelegate, FlutterStreamHandler, FlutterImplicitEngi
             do {
                 switch call.method {
                 case "initialize":
-                    try await nativeCamera().configure()
-                    send(status: "Ready", live: false)
-                    result(nil)
+                    print("[PO] initialize() called")
+                    do {
+                        try await nativeCamera().configure()
+                        send(status: "Ready", live: false)
+                        result(nil)
+                    } catch {
+                        print("[PO] initialize() failed: \(error)")
+                        throw error
+                    }
                 case "flutterRendered":
                     print("[PO] Flutter reported first rendered frame")
                     updateBootOverlay("flutter frame rendered")
