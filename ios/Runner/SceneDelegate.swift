@@ -19,7 +19,8 @@ import Flutter
 
         if let rootViewController = window.rootViewController as? FlutterViewController,
            let appDelegate = UIApplication.shared.delegate as? AppDelegate {
-            appDelegate.installNativeSurface(in: window, controller: rootViewController)
+            // Native surface setup deferred to on-demand
+            appDelegate.registerNativeBridge(messenger: rootViewController.binaryMessenger)
         } else {
             print("[PO] Flutter root view controller was not available in SceneDelegate")
         }
