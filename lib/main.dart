@@ -69,6 +69,7 @@ class _SenderScreenState extends State<SenderScreen> {
   String _stats = '';
   Map<String, Object?> _capabilities = const {};
   DiscoveredReceiver? _receiver;
+  Timer? _autoConnectTimer;
 
   // ── debug overlay ──────────────────────────────────────────────
   final List<String> _log = [];
@@ -97,6 +98,7 @@ class _SenderScreenState extends State<SenderScreen> {
 
   @override
   void dispose() {
+    _autoConnectTimer?.cancel();
     _events?.cancel();
     super.dispose();
   }
@@ -129,8 +131,9 @@ class _SenderScreenState extends State<SenderScreen> {
       await _discover();
       setState(() {
         _busy = false;
-        _status = _receiver == null ? 'Searching receiver' : 'Ready';
+        _status = _receiver == null ? 'Searching receiver' : 'Receiver ready';
       });
+      unawaited(_ensureLive());
       _dbg('boot complete. status=$_status');
     } catch (error) {
       _dbg('boot ERROR: $error');
@@ -152,49 +155,49 @@ class _SenderScreenState extends State<SenderScreen> {
 
   void _handleNativeEvent(Map<String, Object?> event) {
     _dbg('native event: $event');
+    final nextLive = event['live'] == true;
     setState(() {
       _status = event['status']?.toString() ?? _status;
       _stats = event['stats']?.toString() ?? _stats;
-      _live = event['live'] == true;
+      _live = nextLive;
+    });
+    if (!nextLive && _config.autoReconnect) {
+      _scheduleAutoConnect();
+    }
+  }
+
+  void _scheduleAutoConnect([Duration delay = const Duration(seconds: 2)]) {
+    _autoConnectTimer?.cancel();
+    _autoConnectTimer = Timer(delay, () {
+      if (!mounted || _live || _busy) return;
+      unawaited(_ensureLive());
     });
   }
 
-  Future<void> _toggleLive() async {
-    if (_busy) return;
+  Future<void> _ensureLive() async {
+    if (_busy || _live) return;
     final camera = context.read<CameraState>();
     setState(() => _busy = true);
     try {
-      if (_live) {
-        await NativeStreamer.stopStream();
-        await camera.initialize();
-        setState(() {
-          _live = false;
-          _status = 'Ready';
-        });
-      } else {
-        if (_receiver == null) {
-          await _discover();
-        }
-        if (_receiver == null) {
-          setState(() => _status = 'No receiver found');
-          return;
-        }
-        await camera.release();
-        await NativeStreamer.initialize();
-        await NativeStreamer.startStream(_config);
-        setState(() {
-          _live = true;
-          _status = 'Live';
-        });
+      if (_receiver == null) {
+        await _discover();
       }
+      if (_receiver == null) {
+        setState(() => _status = 'No receiver found');
+        _scheduleAutoConnect();
+        return;
+      }
+      await camera.release();
+      await NativeStreamer.initialize();
+      await NativeStreamer.startStream(_config);
+      setState(() {
+        _live = true;
+        _status = 'Live';
+      });
     } catch (error) {
       setState(() => _status = 'Stream error: $error');
-      if (_config.autoReconnect && _receiver != null) {
-        unawaited(Future<void>.delayed(const Duration(seconds: 2), () async {
-          if (!_live && mounted) {
-            await _discover();
-          }
-        }));
+      if (_config.autoReconnect) {
+        _scheduleAutoConnect();
       }
     } finally {
       setState(() => _busy = false);
@@ -313,7 +316,10 @@ class _SenderScreenState extends State<SenderScreen> {
                   config: _config,
                   receiver: _receiver,
                   capabilities: _capabilities,
-                  onDiscover: _discover,
+                  onDiscover: () async {
+                    await _discover();
+                    await _ensureLive();
+                  },
                   onProfileChanged: (profile) => setState(() {
                     _config = _config.copyWith(
                         profile: profile,
@@ -327,9 +333,6 @@ class _SenderScreenState extends State<SenderScreen> {
                   }),
                   onLatencyChanged: (value) => setState(() {
                     _config = _config.copyWith(latencyMs: value.round());
-                  }),
-                  onAutoReconnectChanged: (value) => setState(() {
-                    _config = _config.copyWith(autoReconnect: value);
                   }),
                   onKeepScreenOnChanged: (value) async {
                     await NativeStreamer.setKeepScreenOn(value);
@@ -350,28 +353,10 @@ class _SenderScreenState extends State<SenderScreen> {
                             _busy ? null : () => unawaited(_switchCamera()),
                         icon: const Icon(Icons.cameraswitch),
                       ),
-                      GestureDetector(
-                        onTap: _toggleLive,
-                        child: AnimatedContainer(
-                          duration: const Duration(milliseconds: 160),
-                          width: 86,
-                          height: 86,
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            color: _live ? Colors.black : Colors.red,
-                            border: Border.all(
-                              color: _live ? Colors.red : Colors.white,
-                              width: 5,
-                            ),
-                          ),
-                          child: _busy
-                              ? const Padding(
-                                  padding: EdgeInsets.all(24),
-                                  child:
-                                      CircularProgressIndicator(strokeWidth: 3),
-                                )
-                              : null,
-                        ),
+                      _AutoConnectStatus(
+                        busy: _busy,
+                        live: _live,
+                        receiver: _receiver,
                       ),
                       IconButton.filledTonal(
                         onPressed:
@@ -438,6 +423,49 @@ class _SenderScreenState extends State<SenderScreen> {
           // ──────────────────────────────────────────────────────
         ],
       ),
+    );
+  }
+}
+
+class _AutoConnectStatus extends StatelessWidget {
+  const _AutoConnectStatus({
+    required this.busy,
+    required this.live,
+    required this.receiver,
+  });
+
+  final bool busy;
+  final bool live;
+  final DiscoveredReceiver? receiver;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = live
+        ? Colors.greenAccent
+        : receiver == null
+            ? Colors.orangeAccent
+            : Colors.lightBlueAccent;
+    final icon = live
+        ? Icons.sensors
+        : receiver == null
+            ? Icons.radar
+            : Icons.sync;
+
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 180),
+      width: 72,
+      height: 72,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: Colors.black.withValues(alpha: .48),
+        border: Border.all(color: color, width: 3),
+      ),
+      child: busy
+          ? Padding(
+              padding: const EdgeInsets.all(20),
+              child: CircularProgressIndicator(strokeWidth: 3, color: color),
+            )
+          : Icon(icon, color: color, size: 30),
     );
   }
 }
@@ -514,7 +542,7 @@ class _TopBar extends StatelessWidget {
                 width: 10,
                 height: 10,
                 decoration: BoxDecoration(
-                  color: live ? Colors.red : Colors.green,
+                  color: live ? Colors.greenAccent : Colors.orangeAccent,
                   shape: BoxShape.circle,
                 ),
               ),
@@ -627,7 +655,6 @@ class _SettingsPanel extends StatelessWidget {
     required this.onCodecChanged,
     required this.onMicrophoneChanged,
     required this.onLatencyChanged,
-    required this.onAutoReconnectChanged,
     required this.onKeepScreenOnChanged,
     required this.onGridChanged,
   });
@@ -640,7 +667,6 @@ class _SettingsPanel extends StatelessWidget {
   final ValueChanged<bool> onCodecChanged;
   final ValueChanged<bool> onMicrophoneChanged;
   final ValueChanged<double> onLatencyChanged;
-  final ValueChanged<bool> onAutoReconnectChanged;
   final ValueChanged<bool> onKeepScreenOnChanged;
   final ValueChanged<bool> onGridChanged;
 
@@ -741,11 +767,6 @@ class _SettingsPanel extends StatelessWidget {
             spacing: 8,
             runSpacing: 8,
             children: [
-              FilterChip(
-                label: const Text('Auto rediscover'),
-                selected: config.autoReconnect,
-                onSelected: onAutoReconnectChanged,
-              ),
               FilterChip(
                 label: const Text('Keep screen awake'),
                 selected: config.keepScreenOn,
