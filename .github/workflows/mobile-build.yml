@@ -64,6 +64,12 @@ jobs:
           fi
 
           echo "Packaging $APP_PATH"
+          if [ ! -f "$APP_PATH/Assets.car" ]; then
+            echo "ERROR: $APP_PATH is missing Assets.car"
+            find ios/build/DerivedData/Build/Products build/ios/iphoneos -path '*/Runner.app/Assets.car' -type f 2>/dev/null
+            exit 1
+          fi
+
           cp -r "$APP_PATH" Payload/
           zip -r stream-unsigned.ipa Payload
 
