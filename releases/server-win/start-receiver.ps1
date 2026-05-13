@@ -68,23 +68,45 @@ $ffmpegArgs = @(
     '-map', '0', '-c', 'copy', '-f', 'mpegts', $target
 )
 
-$proc = Start-Process -FilePath $ffmpegPath -ArgumentList $ffmpegArgs -PassThru -NoNewWindow
+$proc = $null
 try {
-    while (-not $proc.HasExited) {
-        Start-Sleep -Milliseconds 400
-
+    while ($true) {
         if ($discoveryJob -and $discoveryJob.State -ne 'Running') {
             $out = Receive-Job $discoveryJob -ErrorAction SilentlyContinue
             Write-Host ""
             if ($out) { $out | Where-Object { $_ } | ForEach-Object { Write-Host $_ } }
             Write-Host "[Receiver] Discovery server stopped - halting receiver."
-            if (-not $proc.HasExited) { $proc.Kill() }
             break
         }
+
+        Write-Host "[Receiver] Waiting for SRT caller on UDP $SrtPort..."
+        $proc = Start-Process -FilePath $ffmpegPath -ArgumentList $ffmpegArgs -PassThru -NoNewWindow
+
+        while (-not $proc.HasExited) {
+            Start-Sleep -Milliseconds 400
+
+            if ($discoveryJob -and $discoveryJob.State -ne 'Running') {
+                $out = Receive-Job $discoveryJob -ErrorAction SilentlyContinue
+                Write-Host ""
+                if ($out) { $out | Where-Object { $_ } | ForEach-Object { Write-Host $_ } }
+                Write-Host "[Receiver] Discovery server stopped - halting receiver."
+                if (-not $proc.HasExited) { $proc.Kill() }
+                break
+            }
+        }
+
+        if ($discoveryJob -and $discoveryJob.State -ne 'Running') {
+            break
+        }
+
+        $exitCode = $proc.ExitCode
+        $proc = $null
+        Write-Host "[Receiver] ffmpeg exited with code $exitCode. Restarting listener in 1s..."
+        Start-Sleep -Seconds 1
     }
-    if (-not $proc.HasExited) { $proc.WaitForExit(3000) | Out-Null }
+    if ($proc -and -not $proc.HasExited) { $proc.WaitForExit(3000) | Out-Null }
 } finally {
-    if (-not $proc.HasExited) { $proc.Kill(); $proc.WaitForExit(2000) | Out-Null }
+    if ($proc -and -not $proc.HasExited) { $proc.Kill(); $proc.WaitForExit(2000) | Out-Null }
     if ($discoveryJob) {
         $out = Receive-Job $discoveryJob -ErrorAction SilentlyContinue
         if ($out) { $out | Where-Object { $_ } | ForEach-Object { Write-Host $_ } }

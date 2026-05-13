@@ -20,6 +20,10 @@ final class CameraController: NSObject {
     private var previewRunning = false
     private var streaming = false
 
+    var isStreaming: Bool {
+        streaming
+    }
+
     func configure() async throws {
         print("[PO] configure() start - requesting camera permission")
         if configured {

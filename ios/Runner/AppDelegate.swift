@@ -224,22 +224,22 @@ class AppDelegate: FlutterAppDelegate, FlutterStreamHandler, FlutterImplicitEngi
                     result(nil)
                 case "switchCamera":
                     try await nativeCamera().switchCamera()
-                    send(status: "Camera switched", live: false)
+                    send(status: "Camera switched", live: camera?.isStreaming == true)
                     result(nil)
                 case "setTorch":
                     let enabled = (call.arguments as? [String: Any])?["enabled"] as? Bool ?? false
                     try await nativeCamera().setTorch(enabled)
-                    send(status: enabled ? "Torch on" : "Torch off", live: false)
+                    send(status: enabled ? "Torch on" : "Torch off", live: camera?.isStreaming == true)
                     result(nil)
                 case "setZoom":
                     let value = (call.arguments as? [String: Any])?["value"] as? Double ?? 1
                     try await nativeCamera().setZoom(CGFloat(value))
-                    send(status: String(format: "Zoom %.1fx", value), live: false)
+                    send(status: String(format: "Zoom %.1fx", value), live: camera?.isStreaming == true)
                     result(nil)
                 case "setKeepScreenOn":
                     let enabled = (call.arguments as? [String: Any])?["enabled"] as? Bool ?? false
                     UIApplication.shared.isIdleTimerDisabled = enabled
-                    send(status: enabled ? "Screen awake lock on" : "Screen awake lock off", live: false)
+                    send(status: enabled ? "Screen awake lock on" : "Screen awake lock off", live: camera?.isStreaming == true)
                     result(nil)
                 default:
                     result(FlutterMethodNotImplemented)
