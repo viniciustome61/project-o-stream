@@ -10,9 +10,9 @@ final class CameraController: NSObject {
 
     private let captureSession = AVCaptureSession()
     private let captureQueue = DispatchQueue(label: "project_o_stream.capture")
-    private let connection = SRTConnection()
-    private lazy var stream = SRTStream(connection: connection)
-    private lazy var mixer = MediaMixer()
+    private var connection: SRTConnection?
+    private var stream: SRTStream?
+    private var mixer: MediaMixer?
     private var activeVideoInput: AVCaptureDeviceInput?
     private var activeAudioInput: AVCaptureDeviceInput?
     private var cameraPosition: AVCaptureDevice.Position = .back
@@ -73,14 +73,31 @@ final class CameraController: NSObject {
     }
 
     func startStream(config: [String: Any]) async throws {
+        if streaming {
+            await stopStream()
+        }
+
         let host = config["host"] as? String ?? ""
         let port = config["port"] as? Int ?? 7070
         let latencyMs = config["latencyMs"] as? Int ?? 80
+        let microphone = config["microphone"] as? Bool ?? true
+
+        guard !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw StreamError.invalidArguments
+        }
 
         let profile = config["profile"] as? [String: Any]
         let width = profile?["width"] as? Int ?? 3840
         let height = profile?["height"] as? Int ?? 2160
         let bitrate = profile?["bitrate"] as? Int ?? 12_000_000
+        let latencyUs = latencyMs * 1000
+
+        let connection = SRTConnection()
+        let stream = SRTStream(connection: connection)
+        let mixer = MediaMixer()
+        self.connection = connection
+        self.stream = stream
+        self.mixer = mixer
 
         try await stream.setVideoSettings(VideoCodecSettings(
             videoSize: CGSize(width: CGFloat(width), height: CGFloat(height)),
@@ -89,29 +106,36 @@ final class CameraController: NSObject {
         ))
 
         try await mixer.attachVideo(activeVideoInput?.device ?? currentVideoDevice(), track: 0)
-        if let audioDevice = activeAudioInput?.device ?? AVCaptureDevice.default(for: .audio) {
+        if microphone, let audioDevice = activeAudioInput?.device ?? AVCaptureDevice.default(for: .audio) {
             try await mixer.attachAudio(audioDevice, track: 0)
         }
         await mixer.addOutput(stream)
 
-        guard let url = URL(string: "srt://\(host):\(port)?mode=caller&latency=\(latencyMs)") else {
+        let urlString = "srt://\(host):\(port)?mode=caller&transtype=live&latency=\(latencyUs)&tlpktdrop=1&pkt_size=1316"
+        guard let url = URL(string: urlString) else {
             throw StreamError.invalidArguments
         }
+        print("[PO] connecting SRT: \(urlString)")
         try await connection.connect(url)
         await stream.publish()
         streaming = true
     }
 
-    func stopStream() {
-        Task {
-            await stream.close()
-            await connection.close()
-        }
+    func stopStream() async {
+        let activeStream = stream
+        let activeConnection = connection
+        stream = nil
+        connection = nil
+        mixer = nil
         streaming = false
+        await activeStream?.close()
+        await activeConnection?.close()
     }
 
     func stop() {
-        stopStream()
+        Task {
+            await stopStream()
+        }
         previewRunning = false
         let session = captureSession
         captureQueue.async {
@@ -127,7 +151,7 @@ final class CameraController: NSObject {
         captureSession.beginConfiguration()
         try installVideoInput(position: cameraPosition)
         captureSession.commitConfiguration()
-        if streaming {
+        if streaming, let mixer {
             try await mixer.attachVideo(currentVideoDevice(), track: 0)
         }
         print("[PO] switched camera to \(cameraPosition == .back ? "back" : "front")")

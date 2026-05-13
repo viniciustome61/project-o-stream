@@ -219,7 +219,7 @@ class AppDelegate: FlutterAppDelegate, FlutterStreamHandler, FlutterImplicitEngi
                     send(status: "Live", live: true)
                     result(nil)
                 case "stopStream":
-                    camera?.stopStream()
+                    await camera?.stopStream()
                     send(status: "Ready", live: false)
                     result(nil)
                 case "switchCamera":
