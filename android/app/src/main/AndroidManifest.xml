@@ -9,7 +9,9 @@
     <uses-feature android:name="android.hardware.camera" android:required="true" />
 
     <application
+        android:icon="@mipmap/ic_launcher"
         android:label="Project O Stream"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:requestLegacyExternalStorage="true"
         android:theme="@style/AppTheme"
         android:usesCleartextTraffic="false">
