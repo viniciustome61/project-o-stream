@@ -46,7 +46,6 @@ jobs:
             -configuration Release \
             -derivedDataPath build/DerivedData \
             -destination 'generic/platform=iOS' \
-            -arch arm64 \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             ONLY_ACTIVE_ARCH=NO \
