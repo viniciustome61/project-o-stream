@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:camera/camera.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -70,6 +71,8 @@ class _SenderScreenState extends State<SenderScreen> {
   Map<String, Object?> _capabilities = const {};
   DiscoveredReceiver? _receiver;
   Timer? _autoConnectTimer;
+  bool _previewStarted = false;
+  bool _useNativePreview = true;
   final Completer<void> _firstFrameReady = Completer<void>();
 
   // ── debug overlay ──────────────────────────────────────────────
@@ -133,6 +136,7 @@ class _SenderScreenState extends State<SenderScreen> {
       _capabilities = await NativeStreamer.getCapabilities();
       _dbg('capabilities: $_capabilities');
       await NativeStreamer.setKeepScreenOn(_config.keepScreenOn);
+      await _startPreviewWhenReady();
       await _discover();
       setState(() {
         _busy = false;
@@ -146,6 +150,39 @@ class _SenderScreenState extends State<SenderScreen> {
         _busy = false;
         _status = 'Camera unavailable: $error';
       });
+    }
+  }
+
+  Future<void> _startPreviewWhenReady() async {
+    if (_previewStarted) return;
+    setState(() => _status = 'Starting preview');
+
+    if (_capabilities['preview'] == true) {
+      try {
+        await _waitForFirstFrame();
+        await NativeStreamer.startPreview();
+        _previewStarted = true;
+        return;
+      } catch (error) {
+        _dbg('native preview ERROR: $error');
+        if (mounted) {
+          setState(() => _useNativePreview = false);
+        }
+      }
+    } else {
+      if (mounted) {
+        setState(() => _useNativePreview = false);
+      } else {
+        _useNativePreview = false;
+      }
+    }
+
+    if (!mounted) return;
+    final camera = context.read<CameraState>();
+    await camera.initialize();
+    _previewStarted = camera.isReady;
+    if (!_previewStarted && camera.error != null) {
+      setState(() => _status = 'Preview unavailable: ${camera.error}');
     }
   }
 
@@ -291,7 +328,9 @@ class _SenderScreenState extends State<SenderScreen> {
               decoration: BoxDecoration(color: Color(0xff101820)),
             ),
           ),
-          const Positioned.fill(child: FlutterCameraPreview()),
+          Positioned.fill(
+            child: NativeCameraPreview(enabled: _useNativePreview),
+          ),
           Positioned.fill(
             child: DecoratedBox(
               decoration: BoxDecoration(
@@ -502,32 +541,37 @@ class FlutterCameraPreview extends StatelessWidget {
         }
 
         final message = camera.error ??
-            (camera.isInitializing ? 'Starting camera' : 'Camera ready');
+            (camera.isInitializing ? 'Starting camera' : 'Camera preview');
         return ColoredBox(
           color: const Color(0xff101820),
           child: Center(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  message,
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(color: Colors.white70),
-                ),
-                const SizedBox(height: 12),
-                FilledButton.icon(
-                  onPressed: camera.isInitializing
-                      ? null
-                      : () => unawaited(camera.initialize()),
-                  icon: const Icon(Icons.videocam),
-                  label: const Text('Start preview'),
-                ),
-              ],
+            child: Text(
+              message,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Colors.white70),
             ),
           ),
         );
       },
     );
+  }
+}
+
+class NativeCameraPreview extends StatelessWidget {
+  const NativeCameraPreview({required this.enabled, super.key});
+
+  static const _viewType = 'project_o_stream/preview';
+  final bool enabled;
+
+  @override
+  Widget build(BuildContext context) {
+    if (enabled && defaultTargetPlatform == TargetPlatform.iOS) {
+      return const UiKitView(viewType: _viewType);
+    }
+    if (enabled && defaultTargetPlatform == TargetPlatform.android) {
+      return const AndroidView(viewType: _viewType);
+    }
+    return const FlutterCameraPreview();
   }
 }
 

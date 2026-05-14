@@ -8,6 +8,7 @@ class AppDelegate: FlutterAppDelegate, FlutterStreamHandler {
     private var methodChannel: FlutterMethodChannel?
     private var eventChannel: FlutterEventChannel?
     private var nativeBridgeRegistered = false
+    private var nativePreviewRegistered = false
     private var camera: CameraController?
     private var bootOverlay: UIView?
     private weak var bootOverlayLabel: UILabel?
@@ -17,6 +18,7 @@ class AppDelegate: FlutterAppDelegate, FlutterStreamHandler {
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
     ) -> Bool {
         GeneratedPluginRegistrant.register(with: self)
+        registerNativePreviewFactory()
 
         let launched = super.application(application, didFinishLaunchingWithOptions: launchOptions)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
@@ -55,6 +57,18 @@ class AppDelegate: FlutterAppDelegate, FlutterStreamHandler {
         return camera
     }
 
+    @MainActor
+    private func registerNativePreviewFactory() {
+        guard !nativePreviewRegistered else { return }
+        let previewRegistrar = registrar(forPlugin: "ProjectONativePreview")
+        previewRegistrar.register(
+            PreviewFactory(camera: nativeCamera()),
+            withId: "project_o_stream/preview"
+        )
+        nativePreviewRegistered = true
+        print("[PO] native preview platform view registered")
+    }
+
     private func installNativeBridgeWhenFlutterViewIsReady() {
         if installNativeBridgeOnCurrentRootController() {
             return
@@ -88,6 +102,7 @@ class AppDelegate: FlutterAppDelegate, FlutterStreamHandler {
         controller.view.backgroundColor = .clear
 
         registerNativeBridge(messenger: controller.binaryMessenger)
+        registerNativePreviewFactory()
         installBootOverlay(in: window, status: "native boot ok")
     }
 
@@ -154,7 +169,7 @@ class AppDelegate: FlutterAppDelegate, FlutterStreamHandler {
                 case "initialize":
                     print("[PO] initialize() called")
                     do {
-                        try await nativeCamera().configure()
+                        try await nativeCamera().configure(includeAudio: false)
                         send(status: "Ready", live: false)
                         result(nil)
                     } catch {

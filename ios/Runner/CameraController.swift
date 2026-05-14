@@ -24,10 +24,13 @@ final class CameraController: NSObject {
         streaming
     }
 
-    func configure() async throws {
+    func configure(includeAudio: Bool = false) async throws {
         print("[PO] configure() start - requesting camera permission")
         if configured {
             print("[PO] configure() skipped - camera already configured")
+            if includeAudio {
+                try await ensureAudioInputIfAllowed()
+            }
             return
         }
 
@@ -37,18 +40,23 @@ final class CameraController: NSObject {
             throw NSError(domain: "ProjectOStream", code: 3,
                           userInfo: [NSLocalizedDescriptionKey: "Camera permission denied"])
         }
-        let micOK = await AVCaptureDevice.requestAccess(for: .audio)
-        print("[PO] mic permission: \(micOK)")
-        guard micOK else {
-            throw NSError(domain: "ProjectOStream", code: 4,
-                          userInfo: [NSLocalizedDescriptionKey: "Microphone permission denied"])
+        var audioAllowed = false
+        if includeAudio {
+            audioAllowed = await AVCaptureDevice.requestAccess(for: .audio)
+            print("[PO] mic permission: \(audioAllowed)")
+            guard audioAllowed else {
+                throw NSError(domain: "ProjectOStream", code: 4,
+                              userInfo: [NSLocalizedDescriptionKey: "Microphone permission denied"])
+            }
         }
 
         print("[PO] configuring AVCaptureSession preview")
         captureSession.beginConfiguration()
         captureSession.sessionPreset = .hd1920x1080
         try installVideoInput(position: cameraPosition)
-        installAudioInputIfAvailable()
+        if audioAllowed {
+            installAudioInputIfAvailable()
+        }
         captureSession.commitConfiguration()
 
         previewView.attach(session: captureSession)
@@ -59,9 +67,8 @@ final class CameraController: NSObject {
     }
 
     func startPreview() async throws {
-        guard configured else {
-            try await configure()
-            return
+        if !configured {
+            try await configure(includeAudio: false)
         }
         guard !previewRunning else { return }
 
@@ -85,6 +92,12 @@ final class CameraController: NSObject {
         let port = config["port"] as? Int ?? 7070
         let latencyMs = config["latencyMs"] as? Int ?? 80
         let microphone = config["microphone"] as? Bool ?? true
+
+        if !configured {
+            try await configure(includeAudio: microphone)
+        } else if microphone {
+            try await ensureAudioInputIfAllowed()
+        }
 
         guard !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw StreamError.invalidArguments
@@ -212,6 +225,20 @@ final class CameraController: NSObject {
         }
         captureSession.addInput(input)
         activeAudioInput = input
+    }
+
+    private func ensureAudioInputIfAllowed() async throws {
+        guard activeAudioInput == nil else { return }
+        let micOK = await AVCaptureDevice.requestAccess(for: .audio)
+        print("[PO] mic permission: \(micOK)")
+        guard micOK else {
+            throw NSError(domain: "ProjectOStream", code: 4,
+                          userInfo: [NSLocalizedDescriptionKey: "Microphone permission denied"])
+        }
+
+        captureSession.beginConfiguration()
+        installAudioInputIfAvailable()
+        captureSession.commitConfiguration()
     }
 
     private func currentVideoDevice() -> AVCaptureDevice {
