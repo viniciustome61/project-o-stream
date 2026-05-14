@@ -20,8 +20,6 @@
 		97C147011CF9000F007C117D /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FF1CF9000F007C117D /* LaunchScreen.storyboard */; };
 		BB000400000000000000004A /* HaishinKit in Frameworks */ = {isa = PBXBuildFile; productRef = BB000200000000000000002A /* HaishinKit */; };
 		BB000500000000000000005A /* SRTHaishinKit in Frameworks */ = {isa = PBXBuildFile; productRef = BB000300000000000000003A /* SRTHaishinKit */; };
-		BB000600000000000000006A /* HaishinKit in Embed Frameworks */ = {isa = PBXBuildFile; productRef = BB000200000000000000002A /* HaishinKit */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
-		BB000700000000000000007A /* SRTHaishinKit in Embed Frameworks */ = {isa = PBXBuildFile; productRef = BB000300000000000000003A /* SRTHaishinKit */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -41,8 +39,6 @@
 			dstPath = "";
 			dstSubfolderSpec = 10;
 			files = (
-				BB000600000000000000006A /* HaishinKit in Embed Frameworks */,
-				BB000700000000000000007A /* SRTHaishinKit in Embed Frameworks */,
 			);
 			name = "Embed Frameworks";
 			runOnlyForDeploymentPostprocessing = 0;

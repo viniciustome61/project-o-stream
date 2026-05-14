@@ -69,12 +69,6 @@ jobs:
             find ios/build/DerivedData/Build/Products build/ios/iphoneos -path '*/Runner.app/Assets.car' -type f 2>/dev/null
             exit 1
           fi
-          if [ ! -d "$APP_PATH/Frameworks/HaishinKit.framework" ] || [ ! -d "$APP_PATH/Frameworks/SRTHaishinKit.framework" ]; then
-            echo "ERROR: $APP_PATH is missing embedded HaishinKit SPM frameworks"
-            find ios/build/DerivedData/Build/Products build/ios/iphoneos -path '*/Runner.app/Frameworks/*HaishinKit.framework' -type d 2>/dev/null
-            exit 1
-          fi
-
           cp -r "$APP_PATH" Payload/
           zip -r stream-unsigned.ipa Payload
 

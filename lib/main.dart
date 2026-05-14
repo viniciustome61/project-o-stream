@@ -70,6 +70,7 @@ class _SenderScreenState extends State<SenderScreen> {
   Map<String, Object?> _capabilities = const {};
   DiscoveredReceiver? _receiver;
   Timer? _autoConnectTimer;
+  final Completer<void> _firstFrameReady = Completer<void>();
 
   // ── debug overlay ──────────────────────────────────────────────
   final List<String> _log = [];
@@ -88,6 +89,9 @@ class _SenderScreenState extends State<SenderScreen> {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_firstFrameReady.isCompleted) {
+        _firstFrameReady.complete();
+      }
       unawaited(NativeStreamer.markFlutterRendered().catchError((error) {
         _dbg('flutterRendered signal failed: $error');
       }));
@@ -133,7 +137,7 @@ class _SenderScreenState extends State<SenderScreen> {
         _busy = false;
         _status = _receiver == null ? 'Searching receiver' : 'Receiver ready';
       });
-      unawaited(_ensureLive());
+      _scheduleAutoConnect(const Duration(seconds: 2));
       _dbg('boot complete. status=$_status');
     } catch (error) {
       _dbg('boot ERROR: $error');
@@ -174,11 +178,21 @@ class _SenderScreenState extends State<SenderScreen> {
     });
   }
 
+  Future<void> _waitForFirstFrame() async {
+    if (_firstFrameReady.isCompleted) return;
+    try {
+      await _firstFrameReady.future.timeout(const Duration(seconds: 2));
+    } on TimeoutException {
+      _dbg('first Flutter frame wait timed out; continuing auto-connect');
+    }
+  }
+
   Future<void> _ensureLive() async {
     if (_busy || _live) return;
     final camera = context.read<CameraState>();
     setState(() => _busy = true);
     try {
+      await _waitForFirstFrame();
       if (_receiver == null) {
         await _discover();
       }
