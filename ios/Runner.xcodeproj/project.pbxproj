@@ -295,6 +295,7 @@
 				A5B1F0041CF9000F007C1180 /* CameraController.swift in Sources */,
 				1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */,
 				7884E8682EC3CC0700C636F2 /* SceneDelegate.swift in Sources */,
+				A5B1F0051CF9000F007C1180 /* PreviewFactory.swift in Sources */,
 				A5B1F0061CF9000F007C1180 /* SimpleCameraPreview.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

@@ -60,9 +60,12 @@ class AppDelegate: FlutterAppDelegate, FlutterStreamHandler {
     @MainActor
     private func registerNativePreviewFactory() {
         guard !nativePreviewRegistered else { return }
-        let previewRegistrar = registrar(forPlugin: "ProjectONativePreview")
+        guard let previewRegistrar = registrar(forPlugin: "ProjectONativePreview") else {
+            print("[PO] native preview registrar unavailable")
+            return
+        }
         previewRegistrar.register(
-            PreviewFactory(camera: nativeCamera()),
+            PreviewFactory(view: nativeCamera().previewView),
             withId: "project_o_stream/preview"
         )
         nativePreviewRegistered = true

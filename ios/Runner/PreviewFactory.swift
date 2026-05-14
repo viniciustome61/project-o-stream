@@ -2,15 +2,15 @@ import Flutter
 import UIKit
 
 final class PreviewFactory: NSObject, FlutterPlatformViewFactory {
-    private let camera: CameraController
+    private let previewView: UIView
 
-    init(camera: CameraController) {
-        self.camera = camera
+    init(view: UIView) {
+        previewView = view
         super.init()
     }
 
     func create(withFrame frame: CGRect, viewIdentifier viewId: Int64, arguments args: Any?) -> FlutterPlatformView {
-        NativePreview(view: camera.previewView)
+        NativePreview(view: previewView)
     }
 }
 
