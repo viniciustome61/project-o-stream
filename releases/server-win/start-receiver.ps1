@@ -2,7 +2,8 @@ param(
     [int]$SrtPort = 7070,
     [int]$ObsUdpPort = 15000,
     [int]$LatencyMs = 80,
-    [switch]$NoDiscovery
+    [switch]$NoDiscovery,
+    [switch]$DirectToObs
 )
 
 $ErrorActionPreference = "Stop"
@@ -15,28 +16,25 @@ if (-not $scriptRoot -and $MyInvocation.MyCommand.Path) {
 }
 if (-not $scriptRoot) { $scriptRoot = Get-Location }
 
-$ffmpeg = Get-Command ffmpeg -ErrorAction SilentlyContinue
-if (-not $ffmpeg) {
-    $fallback = "C:\Users\kings\Downloads\moviesLab\mpv\ffmpeg.exe"
-    if (Test-Path $fallback) {
-        $ffmpeg = Get-Item $fallback
-    } else {
-        Write-Host "ERROR: ffmpeg not found in PATH or at $fallback"
-        Write-Host "Install ffmpeg and add it to PATH, or place ffmpeg.exe in this folder."
-        exit 1
+if (-not $DirectToObs) {
+    $ffmpeg = Get-Command ffmpeg -ErrorAction SilentlyContinue
+    if (-not $ffmpeg) {
+        $fallback = "C:\Users\kings\Downloads\moviesLab\mpv\ffmpeg.exe"
+        if (Test-Path $fallback) {
+            $ffmpeg = Get-Item $fallback
+        } else {
+            Write-Host "ERROR: ffmpeg not found in PATH or at $fallback"
+            Write-Host "Install ffmpeg and add it to PATH, or place ffmpeg.exe in this folder."
+            exit 1
+        }
     }
+    $ffmpegPath = if ($ffmpeg.Source) { $ffmpeg.Source } else { $ffmpeg.FullName }
 }
-$ffmpegPath = if ($ffmpeg.Source) { $ffmpeg.Source } else { $ffmpeg.FullName }
 
 $tailscaleIp = $null
 if (Get-Command tailscale -ErrorAction SilentlyContinue) {
     $tailscaleIp = (& tailscale ip -4 2>$null | Select-Object -First 1)
 }
-
-$latencyUs = $LatencyMs * 1000
-$inputUrl = "srt://0.0.0.0:$($SrtPort)?mode=listener&transtype=live&latency=$latencyUs&rcvlatency=$latencyUs&peerlatency=$latencyUs&tlpktdrop=1&pkt_size=1316"
-$target = "udp://127.0.0.1:$($ObsUdpPort)?pkt_size=1316"
-$obsInput = "udp://127.0.0.1:$ObsUdpPort"
 
 $discoveryJob = $null
 $discoveryScript = Join-Path $scriptRoot "discovery-server.ps1"
@@ -90,6 +88,8 @@ function Ensure-DiscoveryRunning {
 
 Start-DiscoveryJob
 
+$latencyUs = $LatencyMs * 1000
+
 Write-Host ""
 Write-Host "========================================"
 Write-Host " Project O Stream - Receiver"
@@ -97,14 +97,45 @@ Write-Host " SRT listen : srt://0.0.0.0:$SrtPort"
 if ($tailscaleIp) {
     Write-Host " Advertise  : srt://$($tailscaleIp):$SrtPort"
 }
-Write-Host " Output     : $target"
-Write-Host " OBS Input  : $obsInput"
 Write-Host " Latency    : $LatencyMs ms"
+if ($DirectToObs) {
+    Write-Host ""
+    Write-Host " >> OBS Media Source URL (paste as-is):"
+    Write-Host "    srt://0.0.0.0:$($SrtPort)?mode=listener&latency=$($latencyUs)&pkt_size=1316"
+    Write-Host ""
+    Write-Host " >> OBS Media Source settings:"
+    Write-Host "    [x] Restart playback when source becomes inactive"
+} else {
+    Write-Host " Output     : udp://127.0.0.1:$($ObsUdpPort)?pkt_size=1316"
+    Write-Host " OBS Input  : udp://127.0.0.1:$ObsUdpPort"
+}
 if (-not $NoDiscovery) {
     Write-Host " Discovery  : UDP 7071 probes, UDP 7072 offers"
 }
 Write-Host "========================================"
 Write-Host ""
+
+if ($DirectToObs) {
+    Write-Host "[Receiver] Direct-to-OBS mode. Phone connects directly to OBS via SRT."
+    Write-Host "[Receiver] Discovery running. Press Ctrl+C to stop."
+    try {
+        while ($true) {
+            Start-Sleep -Milliseconds 500
+            Ensure-DiscoveryRunning
+        }
+    } finally {
+        if ($discoveryJob) {
+            Write-DiscoveryJobOutput $discoveryJob
+            Stop-Job $discoveryJob -ErrorAction SilentlyContinue
+            Remove-Job $discoveryJob -Force -ErrorAction SilentlyContinue
+        }
+    }
+    return
+}
+
+# --- Legacy relay mode (ffmpeg → UDP → OBS) ---
+$inputUrl = "srt://0.0.0.0:$($SrtPort)?mode=listener&transtype=live&latency=$latencyUs&rcvlatency=$latencyUs&peerlatency=$latencyUs&tlpktdrop=1&pkt_size=1316"
+$target = "udp://127.0.0.1:$($ObsUdpPort)?pkt_size=1316"
 
 $ffmpegArgs = @(
     '-hide_banner', '-loglevel', 'info',

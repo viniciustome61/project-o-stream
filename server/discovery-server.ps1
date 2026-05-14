@@ -5,7 +5,7 @@ param(
     [int]$ClientDiscoveryPort = 7072
 )
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"
 
 $tailscale = Get-Command tailscale -ErrorAction SilentlyContinue
 $tailscaleIp = $null
@@ -125,8 +125,10 @@ try {
             }
         } catch [System.Net.Sockets.SocketException] {
             if ($_.Exception.SocketErrorCode -ne [System.Net.Sockets.SocketError]::TimedOut) {
-                throw
+                Write-Host "[Discovery] probe socket error ($($_.Exception.SocketErrorCode)); continuing."
             }
+        } catch {
+            Write-Host "[Discovery] probe socket unexpected error: $($_.Exception.Message)"
         }
 
         if ($conflictUdp) {
@@ -153,8 +155,10 @@ try {
                 } catch { }
             } catch [System.Net.Sockets.SocketException] {
                 if ($_.Exception.SocketErrorCode -ne [System.Net.Sockets.SocketError]::TimedOut) {
-                    throw
+                    Write-Host "[Discovery] conflict socket error ($($_.Exception.SocketErrorCode)); continuing."
                 }
+            } catch {
+                Write-Host "[Discovery] conflict socket unexpected error: $($_.Exception.Message)"
             }
         }
 

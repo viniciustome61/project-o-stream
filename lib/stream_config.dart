@@ -109,7 +109,6 @@ class SenderConfig {
     required this.latencyMs,
     required this.autoReconnect,
     required this.keepScreenOn,
-    required this.showSafeAreaGrid,
   });
 
   final String host;
@@ -121,7 +120,6 @@ class SenderConfig {
   final int latencyMs;
   final bool autoReconnect;
   final bool keepScreenOn;
-  final bool showSafeAreaGrid;
 
   String get srtUrl => 'srt://$host:$port';
 
@@ -135,7 +133,6 @@ class SenderConfig {
     int? latencyMs,
     bool? autoReconnect,
     bool? keepScreenOn,
-    bool? showSafeAreaGrid,
   }) {
     return SenderConfig(
       host: host ?? this.host,
@@ -147,7 +144,6 @@ class SenderConfig {
       latencyMs: latencyMs ?? this.latencyMs,
       autoReconnect: autoReconnect ?? this.autoReconnect,
       keepScreenOn: keepScreenOn ?? this.keepScreenOn,
-      showSafeAreaGrid: showSafeAreaGrid ?? this.showSafeAreaGrid,
     );
   }
 
@@ -161,6 +157,5 @@ class SenderConfig {
         'latencyMs': latencyMs,
         'autoReconnect': autoReconnect,
         'keepScreenOn': keepScreenOn,
-        'showSafeAreaGrid': showSafeAreaGrid,
       };
 }

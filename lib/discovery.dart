@@ -20,7 +20,7 @@ class DiscoveredReceiver {
   final int roundTripMs;
 
   String get label => '$hostname  $host:$srtPort  ${roundTripMs}ms';
-  String get details => '${transport.toUpperCase()} -> OBS UDP $obsUdpPort';
+  String get details => transport.toUpperCase();
 }
 
 class ReceiverDiscovery {

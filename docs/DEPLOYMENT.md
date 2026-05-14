@@ -11,6 +11,16 @@
 - Android or iOS device logged into the same Tailscale tailnet.
 - Native app installed from the Flutter project root.
 
+## iOS Update Delivery
+
+For project updates, the default iOS delivery path is automated:
+
+```powershell
+python ship.py
+```
+
+`ship.py` pushes changes, triggers the GitHub Actions iOS build, downloads the newest unsigned IPA artifact, and saves it in `releases/`. The local Sideloadly MCP server is configured to use `releases/` as the source of truth for the latest IPA.
+
 ## Receiver
 
 ```powershell

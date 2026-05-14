@@ -3,7 +3,8 @@ param(
     [int]$ObsUdpPort = 15000,
     [int]$LatencyMs = 80,
     [switch]$Health,
-    [switch]$NoDiscovery
+    [switch]$NoDiscovery,
+    [switch]$DirectToObs
 )
 
 $ErrorActionPreference = "Stop"
@@ -23,16 +24,18 @@ if (-not $scriptRoot) {
     }
 }
 
-$ffmpeg = Get-Command ffmpeg -ErrorAction SilentlyContinue
-if (-not $ffmpeg) {
-    $fallback = "C:\Users\kings\Downloads\moviesLab\mpv\ffmpeg.exe"
-    if (Test-Path $fallback) {
-        $ffmpeg = Get-Item $fallback
-    } else {
-        throw "ffmpeg not found in PATH or at $fallback"
+if (-not $DirectToObs) {
+    $ffmpeg = Get-Command ffmpeg -ErrorAction SilentlyContinue
+    if (-not $ffmpeg) {
+        $fallback = "C:\Users\kings\Downloads\moviesLab\mpv\ffmpeg.exe"
+        if (Test-Path $fallback) {
+            $ffmpeg = Get-Item $fallback
+        } else {
+            throw "ffmpeg not found in PATH or at $fallback"
+        }
     }
+    $ffmpegPath = if ($ffmpeg.Source) { $ffmpeg.Source } else { $ffmpeg.FullName }
 }
-$ffmpegPath = if ($ffmpeg.Source) { $ffmpeg.Source } else { $ffmpeg.FullName }
 
 $tailscaleIp = $null
 if (Get-Command tailscale -ErrorAction SilentlyContinue) {
@@ -47,22 +50,23 @@ if (Get-Command tailscale -ErrorAction SilentlyContinue) {
 }
 
 $latencyUs = $LatencyMs * 1000
-$inputUrl = "srt://0.0.0.0:$($SrtPort)?mode=listener&transtype=live&latency=$latencyUs&rcvlatency=$latencyUs&peerlatency=$latencyUs&tlpktdrop=1&pkt_size=1316"
-
-$target = "udp://127.0.0.1:$($ObsUdpPort)?pkt_size=1316"
-$obsInput = "udp://127.0.0.1:$ObsUdpPort"
 
 if ($Health) {
     [pscustomobject]@{
-        service = "project-o-stream-receiver"
-        version = "3.0"
-        tailscaleIp = $tailscaleIp
-        srtPort = $SrtPort
-        obsUdpPort = $ObsUdpPort
-        latencyMs = $LatencyMs
-        ffmpeg = $ffmpegPath
+        service          = "project-o-stream-receiver"
+        version          = "3.0"
+        tailscaleIp      = $tailscaleIp
+        srtPort          = $SrtPort
+        obsUdpPort       = $ObsUdpPort
+        latencyMs        = $LatencyMs
+        ffmpeg           = if ($DirectToObs) { $null } else { $ffmpegPath }
         discoveryEnabled = -not $NoDiscovery
-        obsInput = $obsInput
+        directToObs      = [bool]$DirectToObs
+        obsInput         = if ($DirectToObs) {
+            "srt://0.0.0.0:$($SrtPort)?mode=listener&latency=$($latencyUs)&pkt_size=1316"
+        } else {
+            "udp://127.0.0.1:$ObsUdpPort"
+        }
     } | ConvertTo-Json -Depth 4
     return
 }
@@ -126,14 +130,45 @@ Write-Host " SRT listen : srt://0.0.0.0:$SrtPort"
 if ($tailscaleIp) {
     Write-Host " Advertise  : srt://$($tailscaleIp):$SrtPort"
 }
-Write-Host " Output     : $target"
-Write-Host " OBS Input  : $obsInput"
 Write-Host " Latency    : $LatencyMs ms"
+if ($DirectToObs) {
+    Write-Host ""
+    Write-Host " >> OBS Media Source URL (paste as-is):"
+    Write-Host "    srt://0.0.0.0:$($SrtPort)?mode=listener&latency=$($latencyUs)&pkt_size=1316"
+    Write-Host ""
+    Write-Host " >> OBS Media Source settings:"
+    Write-Host "    [x] Restart playback when source becomes inactive"
+} else {
+    Write-Host " Output     : udp://127.0.0.1:$($ObsUdpPort)?pkt_size=1316"
+    Write-Host " OBS Input  : udp://127.0.0.1:$ObsUdpPort"
+}
 if (-not $NoDiscovery) {
     Write-Host " Discovery  : UDP 7071 probes, UDP 7072 offers"
 }
 Write-Host "========================================"
 Write-Host ""
+
+if ($DirectToObs) {
+    Write-Host "[Receiver] Direct-to-OBS mode. Phone connects directly to OBS via SRT."
+    Write-Host "[Receiver] Discovery running. Press Ctrl+C to stop."
+    try {
+        while ($true) {
+            Start-Sleep -Milliseconds 500
+            Ensure-DiscoveryRunning
+        }
+    } finally {
+        if ($discoveryJob) {
+            Write-DiscoveryJobOutput $discoveryJob
+            Stop-Job $discoveryJob -ErrorAction SilentlyContinue
+            Remove-Job $discoveryJob -Force -ErrorAction SilentlyContinue
+        }
+    }
+    return
+}
+
+# --- Legacy relay mode (ffmpeg → UDP → OBS) ---
+$inputUrl = "srt://0.0.0.0:$($SrtPort)?mode=listener&transtype=live&latency=$latencyUs&rcvlatency=$latencyUs&peerlatency=$latencyUs&tlpktdrop=1&pkt_size=1316"
+$target = "udp://127.0.0.1:$($ObsUdpPort)?pkt_size=1316"
 
 $ffmpegArgs = @(
     '-hide_banner', '-loglevel', 'info',

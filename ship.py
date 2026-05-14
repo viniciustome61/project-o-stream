@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
+"""ship.py – AI-crafted commits → push → CI wait → IPA download."""
+
 import argparse
-import datetime as dt
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -14,323 +16,404 @@ import zipfile
 from pathlib import Path
 from plistlib import load as plist_load
 
-
 REPO_ROOT = Path(__file__).resolve().parent
 API_BASE = "https://api.github.com"
 
 
-def run_git(args: list[str], capture_output: bool = False) -> str:
-    completed = subprocess.run(
-        ["git", *args],
-        cwd=REPO_ROOT,
-        check=True,
-        text=True,
-        capture_output=capture_output,
+# ── env ───────────────────────────────────────────────────────────────────────
+
+def load_env_ship() -> dict[str, str]:
+    """Parse .env.ship from repo root; return key→value map (ignores comments)."""
+    env_file = REPO_ROOT / ".env.ship"
+    if not env_file.exists():
+        return {}
+    result: dict[str, str] = {}
+    for line in env_file.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        result[key.strip()] = value.strip()
+    return result
+
+
+# ── git ───────────────────────────────────────────────────────────────────────
+
+def run_git(args: list[str], capture: bool = False) -> str:
+    r = subprocess.run(
+        ["git", *args], cwd=REPO_ROOT, check=True, text=True,
+        encoding="utf-8", errors="replace", capture_output=capture,
     )
-    return completed.stdout.strip() if capture_output else ""
+    return (r.stdout or "").strip() if capture else ""
 
 
-def get_token(cli_token: str | None) -> str:
-    token = cli_token or os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN")
-    if not token:
-        raise RuntimeError("Missing GitHub token. Use --token or set GITHUB_TOKEN/GH_TOKEN.")
-    return token
+def has_changes() -> bool:
+    return bool(run_git(["status", "--porcelain"], capture=True))
 
 
-def parse_remote_owner_repo() -> tuple[str, str]:
-    remote = run_git(["config", "--get", "remote.origin.url"], capture_output=True)
-    remote = remote.strip()
-    if remote.endswith(".git"):
-        remote = remote[:-4]
+def current_branch(cli: str | None) -> str:
+    return cli or run_git(["rev-parse", "--abbrev-ref", "HEAD"], capture=True)
 
+
+def changed_files() -> list[str]:
+    out = run_git(["status", "--porcelain"], capture=True)
+    result = []
+    for line in out.splitlines():
+        if len(line) < 4:
+            continue
+        path = line[3:].strip().strip('"')
+        if " -> " in path:          # rename: "old -> new"
+            path = path.split(" -> ", 1)[1]
+        result.append(path.replace("\\", "/"))
+    return result
+
+
+def diff_for_ai(max_chars: int = 28_000) -> str:
+    """Stage everything → get cached diff (text files only) → unstage."""
+    run_git(["add", "-A"])
+    # Exclude binary build artifacts — not useful for commit messages
+    diff = run_git(
+        ["diff", "--cached", "--diff-filter=ACMRT", "--",
+         ".", ":(exclude)*.ipa", ":(exclude)*.apk", ":(exclude)*.msi",
+         ":(exclude)*.zip", ":(exclude)*.exe"],
+        capture=True,
+    )
+    run_git(["reset", "HEAD"], capture=True)
+    if len(diff) > max_chars:
+        diff = diff[:max_chars] + "\n[... diff truncated ...]"
+    return diff
+
+
+# ── GitHub ────────────────────────────────────────────────────────────────────
+
+def gh_token(cli: str | None, env_ship: dict[str, str]) -> str:
+    t = (cli
+         or os.getenv("GITHUB_TOKEN")
+         or os.getenv("GH_TOKEN")
+         or env_ship.get("GITHUB_TOKEN")
+         or env_ship.get("GH_TOKEN"))
+    if not t:
+        raise RuntimeError(
+            "GitHub token required. Set GITHUB_TOKEN in .env.ship or pass --token."
+        )
+    return t
+
+
+def owner_repo() -> tuple[str, str]:
+    remote = run_git(["config", "--get", "remote.origin.url"], capture=True)
+    remote = remote.removesuffix(".git")
     if remote.startswith("git@github.com:"):
-        remote = remote.replace("git@github.com:", "", 1)
-        owner, repo = remote.split("/", 1)
+        owner, repo = remote.removeprefix("git@github.com:").split("/", 1)
         return owner, repo
-
-    parsed = urllib.parse.urlparse(remote)
-    if parsed.netloc.lower() != "github.com":
-        raise RuntimeError(f"Unsupported git remote host: {parsed.netloc}")
-
-    path = parsed.path.lstrip("/")
-    if "/" not in path:
-        raise RuntimeError(f"Cannot parse owner/repo from remote: {remote}")
-    owner, repo = path.split("/", 1)
-    return owner, repo
+    path = urllib.parse.urlparse(remote).path.lstrip("/")
+    return tuple(path.split("/", 1))  # type: ignore[return-value]
 
 
-def github_request(
+def gh(
     token: str,
     method: str,
-    path_or_url: str,
+    url_or_path: str,
     payload: dict | None = None,
-    expected_status: set[int] | None = None,
+    ok: set[int] | None = None,
     raw: bool = False,
 ) -> dict | bytes | None:
-    if path_or_url.startswith("http://") or path_or_url.startswith("https://"):
-        url = path_or_url
-    else:
-        url = f"{API_BASE}{path_or_url}"
-
-    body = None
-    headers = {
+    url = url_or_path if url_or_path.startswith("http") else f"{API_BASE}{url_or_path}"
+    hdrs = {
         "Authorization": f"token {token}",
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
     }
+    body = None
     if payload is not None:
-        body = json.dumps(payload).encode("utf-8")
-        headers["Content-Type"] = "application/json"
-
-    req = urllib.request.Request(url=url, method=method, headers=headers, data=body)
+        body = json.dumps(payload).encode()
+        hdrs["Content-Type"] = "application/json"
+    req = urllib.request.Request(url=url, method=method, headers=hdrs, data=body)
     with urllib.request.urlopen(req) as resp:
         status = resp.getcode()
-        if expected_status and status not in expected_status:
-            raise RuntimeError(f"GitHub API returned HTTP {status} for {method} {url}")
+        if ok and status not in ok:
+            raise RuntimeError(f"GitHub {method} {url} → HTTP {status}")
         data = resp.read()
-        if raw:
-            return data
-        if not data:
-            return None
-        return json.loads(data.decode("utf-8"))
+        return data if raw else (json.loads(data.decode()) if data else None)
 
 
-def has_uncommitted_changes() -> bool:
-    return bool(run_git(["status", "--porcelain"], capture_output=True))
-
-
-def get_current_branch(cli_branch: str | None) -> str:
-    if cli_branch:
-        return cli_branch
-    return run_git(["rev-parse", "--abbrev-ref", "HEAD"], capture_output=True)
-
-
-def commit_and_push(branch: str, commit_message: str, should_commit: bool) -> None:
-    if should_commit and has_uncommitted_changes():
-        run_git(["add", "-A"])
-        run_git(["commit", "-m", commit_message])
-    run_git(["push", "origin", branch])
-
-
-def wait_for_new_dispatch_run(
-    token: str,
-    owner: str,
-    repo: str,
-    workflow_file: str,
-    branch: str,
-    started_after: dt.datetime,
-    timeout_seconds: int,
-    poll_interval_seconds: int,
+def wait_for_push_run(
+    token: str, owner: str, repo: str, workflow: str,
+    branch: str, head_sha: str, timeout: int, poll: int,
 ) -> int:
-    deadline = time.time() + timeout_seconds
-    query = urllib.parse.urlencode(
-        {"branch": branch, "event": "workflow_dispatch", "per_page": 20}
-    )
-    path = f"/repos/{owner}/{repo}/actions/workflows/{workflow_file}/runs?{query}"
-
+    qs = urllib.parse.urlencode({"branch": branch, "event": "push", "per_page": 10})
+    path = f"/repos/{owner}/{repo}/actions/workflows/{workflow}/runs?{qs}"
+    deadline = time.time() + timeout
+    print("[ship] Waiting for CI run", end="", flush=True)
     while time.time() < deadline:
-        runs = github_request(token, "GET", path, expected_status={200})
-        assert isinstance(runs, dict)
-        for run in runs.get("workflow_runs", []):
-            created_at = dt.datetime.fromisoformat(run["created_at"].replace("Z", "+00:00"))
-            if created_at >= started_after:
-                return int(run["id"])
-        time.sleep(poll_interval_seconds)
+        try:
+            runs = gh(token, "GET", path, ok={200})
+            assert isinstance(runs, dict)
+            for run in runs.get("workflow_runs", []):
+                if run.get("head_sha") == head_sha:
+                    print(f" → run {run['id']}")
+                    return int(run["id"])
+        except Exception:
+            pass
+        print(".", end="", flush=True)
+        time.sleep(poll)
+    print()
+    raise TimeoutError("Timed out waiting for push-triggered CI run.")
 
-    raise TimeoutError("Timed out waiting for dispatched workflow run to appear.")
 
-
-def wait_for_run_success(
-    token: str,
-    owner: str,
-    repo: str,
-    run_id: int,
-    timeout_seconds: int,
-    poll_interval_seconds: int,
+def wait_for_success(
+    token: str, owner: str, repo: str, run_id: int, timeout: int, poll: int
 ) -> None:
-    deadline = time.time() + timeout_seconds
     path = f"/repos/{owner}/{repo}/actions/runs/{run_id}"
-
+    deadline = time.time() + timeout
+    print("[ship] Building", end="", flush=True)
     while time.time() < deadline:
-        run = github_request(token, "GET", path, expected_status={200})
+        run = gh(token, "GET", path, ok={200})
         assert isinstance(run, dict)
-        status = run.get("status")
-        conclusion = run.get("conclusion")
-        if status == "completed":
+        if run.get("status") == "completed":
+            conclusion = run.get("conclusion", "?")
+            print(f" → {conclusion}")
             if conclusion == "success":
                 return
-            raise RuntimeError(f"Workflow run {run_id} finished with conclusion: {conclusion}")
-        time.sleep(poll_interval_seconds)
+            raise RuntimeError(f"Build {run_id} ended with: {conclusion}")
+        print(".", end="", flush=True)
+        time.sleep(poll)
+    print()
+    raise TimeoutError(f"Timed out waiting for run {run_id}.")
 
-    raise TimeoutError(f"Timed out waiting for workflow run {run_id} to finish.")
 
-
-def get_ios_artifact_id(token: str, owner: str, repo: str, run_id: int, artifact_name: str) -> int:
-    path = f"/repos/{owner}/{repo}/actions/runs/{run_id}/artifacts"
-    data = github_request(token, "GET", path, expected_status={200})
+def artifact_id(token: str, owner: str, repo: str, run_id: int, name: str) -> int:
+    data = gh(token, "GET", f"/repos/{owner}/{repo}/actions/runs/{run_id}/artifacts", ok={200})
     assert isinstance(data, dict)
-    artifacts = data.get("artifacts", [])
-    if not artifacts:
-        raise RuntimeError("No artifacts found for workflow run.")
-
-    for artifact in artifacts:
-        if artifact.get("name") == artifact_name:
-            return int(artifact["id"])
-    raise RuntimeError(f"Artifact '{artifact_name}' was not found in workflow run {run_id}.")
+    for a in data.get("artifacts", []):
+        if a.get("name") == name:
+            return int(a["id"])
+    raise RuntimeError(f"Artifact '{name}' not found in run {run_id}.")
 
 
-def get_app_display_name() -> str:
-    info_plist = REPO_ROOT / "ios" / "Runner" / "Info.plist"
-    with info_plist.open("rb") as f:
-        data = plist_load(f)
-    return str(data.get("CFBundleDisplayName") or data.get("CFBundleName") or "app")
-
-
-def sanitize_file_stem(name: str) -> str:
-    stem = re.sub(r"[^A-Za-z0-9]+", "-", name.strip()).strip("-")
-    return stem or "app"
-
-
-def download_and_extract_ipa(
-    token: str, owner: str, repo: str, artifact_id: int, output_path: Path
-) -> None:
-    artifact_zip_path = f"/repos/{owner}/{repo}/actions/artifacts/{artifact_id}/zip"
+def download_ipa(token: str, owner: str, repo: str, art_id: int, dest: Path) -> None:
+    raw = gh(token, "GET", f"/repos/{owner}/{repo}/actions/artifacts/{art_id}/zip",
+             ok={200, 302}, raw=True)
+    assert isinstance(raw, bytes)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    zp = dest.with_suffix(".zip")
+    zp.write_bytes(raw)
     try:
-        archive_data = github_request(
-            token, "GET", artifact_zip_path, expected_status={200, 302}, raw=True
-        )
-    except urllib.error.HTTPError as exc:
-        if exc.code in {401, 403}:
-            raise RuntimeError(
-                "Cannot download workflow artifact (401/403). "
-                "Your token needs Actions read permission for this repository."
-            ) from exc
-        raise
-    assert isinstance(archive_data, bytes)
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    zip_path = output_path.with_suffix(".zip")
-    zip_path.write_bytes(archive_data)
-
-    try:
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            ipa_members = [name for name in zf.namelist() if name.lower().endswith(".ipa")]
-            if not ipa_members:
-                raise RuntimeError("Downloaded artifact does not contain any .ipa file.")
-            ipa_data = zf.read(ipa_members[0])
-            output_path.write_bytes(ipa_data)
+        with zipfile.ZipFile(zp) as zf:
+            ipas = [n for n in zf.namelist() if n.lower().endswith(".ipa")]
+            if not ipas:
+                raise RuntimeError("No .ipa in artifact zip.")
+            dest.write_bytes(zf.read(ipas[0]))
     finally:
-        if zip_path.exists():
-            zip_path.unlink()
+        zp.unlink(missing_ok=True)
 
+
+# ── Gemini CLI ────────────────────────────────────────────────────────────────
+
+def _extract_json(text: str) -> dict:
+    """Pull the first complete JSON object out of text that may contain other output."""
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end < start:
+        raise RuntimeError(f"No JSON object found in Gemini output:\n{text[:400]}")
+    try:
+        return json.loads(text[start : end + 1])
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Invalid JSON from Gemini ({exc}):\n{text[:400]}") from exc
+
+
+def gemini_commits(diff: str, files: list[str]) -> list[dict]:
+    """Call the local Gemini CLI and return [{message, files}, …]."""
+    files_block = "\n".join(f"  - {f}" for f in files)
+
+    # Full prompt goes to stdin; -p is just the headless trigger
+    stdin_prompt = f"""You are a senior engineer writing git commit messages for a Flutter iOS live-streaming app.
+
+Analyze the diff and identify DISTINCT features, fixes, or refactors. For each group:
+- ONE conventional commit message (feat/fix/refactor/chore/docs)
+- Subject line ≤72 chars
+- Body: tight bullet points for non-obvious changes (what + why)
+- No "Co-Authored-By" lines or footers
+- Group related files; only split when truly independent
+
+Changed files:
+{files_block}
+
+Output ONLY a raw JSON object — no markdown fences, no extra text:
+{{
+  "commits": [
+    {{
+      "message": "type(scope): subject\\n\\n- bullet",
+      "files": ["path/to/file"]
+    }}
+  ]
+}}
+
+Git diff:
+{diff}"""
+
+    env = {**os.environ, "GEMINI_CLI_TRUST_WORKSPACE": "true"}
+    result = subprocess.run(
+        ["gemini", "-p", "Return the JSON object as instructed. No markdown, no extra text."],
+        input=stdin_prompt,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        cwd=REPO_ROOT,
+        timeout=120,
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Gemini CLI exited {result.returncode}:\n{result.stderr.strip()}"
+        )
+
+    return _extract_json(result.stdout).get("commits", [])
+
+
+# ── commit logic ──────────────────────────────────────────────────────────────
+
+def commit_by_feature(commits: list[dict], all_files: set[str]) -> None:
+    done: set[str] = set()
+    for i, c in enumerate(commits, 1):
+        msg = c.get("message", "").strip()
+        valid = [
+            f.replace("\\", "/")
+            for f in c.get("files", [])
+            if f.replace("\\", "/") in all_files
+            and f.replace("\\", "/") not in done
+        ]
+        if not valid:
+            print(f"[ship] Commit {i}: no matching files — skipping.")
+            continue
+        run_git(["add", "--", *valid])
+        run_git(["commit", "-m", msg])
+        done.update(valid)
+        print(f"[ship] [{i}/{len(commits)}] {msg.splitlines()[0]}")
+
+    if run_git(["status", "--porcelain"], capture=True):
+        run_git(["add", "-A"])
+        run_git(["commit", "-m", "chore: remaining changes"])
+        print("[ship] [+] committed leftover files")
+
+
+def ai_commit(files: list[str], fallback: str) -> None:
+    print(f"[gemini] Analyzing {len(files)} changed file(s)...")
+    diff = diff_for_ai()
+    if not diff.strip():
+        print("[ship] Empty diff — nothing to commit.")
+        return
+
+    commits = gemini_commits(diff, files)
+    if not commits:
+        print("[gemini] No commits returned — using fallback message.")
+        run_git(["add", "-A"])
+        run_git(["commit", "-m", fallback])
+        return
+
+    print(f"\n[gemini] {len(commits)} proposed commit(s):\n")
+    for i, c in enumerate(commits, 1):
+        subject = c.get("message", "").splitlines()[0]
+        cfiles = c.get("files", [])
+        preview = ", ".join(cfiles[:3]) + (f"  +{len(cfiles) - 3} more" if len(cfiles) > 3 else "")
+        print(f"  {i}. {subject}")
+        print(f"     {preview}\n")
+
+    ans = input("Commit? [Y / n=abort / s=single message] ").strip().lower()
+    if ans == "n":
+        print("[ship] Aborted.")
+        raise SystemExit(0)
+    if ans == "s":
+        msg = input("Message: ").strip() or fallback
+        run_git(["add", "-A"])
+        run_git(["commit", "-m", msg])
+    else:
+        commit_by_feature(commits, {f.replace("\\", "/") for f in files})
+
+
+# ── IPA ───────────────────────────────────────────────────────────────────────
+
+def app_name() -> str:
+    plist = REPO_ROOT / "ios" / "Runner" / "Info.plist"
+    with plist.open("rb") as f:
+        d = plist_load(f)
+    name = d.get("CFBundleDisplayName") or d.get("CFBundleName") or "app"
+    return re.sub(r"[^A-Za-z0-9]+", "-", str(name).strip()).strip("-") or "app"
+
+
+# ── CLI ───────────────────────────────────────────────────────────────────────
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Commit/push recent changes, trigger GitHub Actions iOS build, and download IPA."
+    p = argparse.ArgumentParser(
+        description="AI commit messages → push → wait for CI → download IPA."
     )
-    parser.add_argument(
-        "--token",
-        default=None,
-        help="GitHub token (fallback: GITHUB_TOKEN or GH_TOKEN env vars).",
-    )
-    parser.add_argument(
-        "--branch",
-        default=None,
-        help="Branch to push and dispatch workflow from (default: current branch).",
-    )
-    parser.add_argument(
-        "--workflow",
-        default="mobile-build.yml",
-        help="Workflow file to dispatch (default: mobile-build.yml).",
-    )
-    parser.add_argument(
-        "--artifact",
-        default="ios-unsigned-ipa",
-        help="Artifact name containing the IPA (default: ios-unsigned-ipa).",
-    )
-    parser.add_argument(
-        "--commit-message",
-        default="chore: ship iOS build",
-        help="Commit message used when local changes exist (default: chore: ship iOS build).",
-    )
-    parser.add_argument(
-        "--skip-commit",
-        action="store_true",
-        help="Do not auto-commit local changes before push.",
-    )
-    parser.add_argument(
-        "--timeout",
-        type=int,
-        default=3600,
-        help="Timeout in seconds for workflow wait operations (default: 3600).",
-    )
-    parser.add_argument(
-        "--poll-interval",
-        type=int,
-        default=10,
-        help="Polling interval in seconds for workflow status checks (default: 10).",
-    )
-    return parser.parse_args()
+    p.add_argument("--token", default=None,
+                   help="GitHub token (overrides .env.ship and env vars).")
+    p.add_argument("--branch", default=None)
+    p.add_argument("--workflow", default="mobile-build.yml")
+    p.add_argument("--artifact", default="ios-unsigned-ipa")
+    p.add_argument("--commit-message", default="chore: ship iOS build",
+                   help="Fallback commit message when Gemini CLI is unavailable.")
+    p.add_argument("--skip-commit", action="store_true")
+    p.add_argument("--skip-build", action="store_true",
+                   help="Commit + push only; skip CI wait and IPA download.")
+    p.add_argument("--timeout", type=int, default=3600)
+    p.add_argument("--poll", type=int, default=10)
+    return p.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    token = get_token(args.token)
-    owner, repo = parse_remote_owner_repo()
-    branch = get_current_branch(args.branch)
+    env_ship = load_env_ship()
+    token = gh_token(args.token, env_ship)
+    owner, repo = owner_repo()
+    branch = current_branch(args.branch)
 
-    print(f"[ship] Repo: {owner}/{repo}")
-    print(f"[ship] Branch: {branch}")
-    print("[ship] Pushing recent changes...")
-    commit_and_push(branch, args.commit_message, should_commit=not args.skip_commit)
+    print(f"[ship] {owner}/{repo}  branch={branch}")
 
-    dispatch_time = dt.datetime.now(dt.UTC)
-    dispatch_path = f"/repos/{owner}/{repo}/actions/workflows/{args.workflow}/dispatches"
-    print(f"[ship] Dispatching workflow: {args.workflow}")
-    github_request(
-        token,
-        "POST",
-        dispatch_path,
-        payload={"ref": branch},
-        expected_status={204},
+    # ── commit ────────────────────────────────────────────────────────────────
+    if not args.skip_commit:
+        if has_changes():
+            files = changed_files()
+            try:
+                ai_commit(files, args.commit_message)
+            except FileNotFoundError:
+                print("[ship] Gemini CLI not found — using fallback commit message.")
+                run_git(["add", "-A"])
+                run_git(["commit", "-m", args.commit_message])
+        else:
+            print("[ship] No uncommitted changes.")
+
+    # ── push ──────────────────────────────────────────────────────────────────
+    print("[ship] Pushing...")
+    run_git(["push", "origin", branch])
+    head_sha = run_git(["rev-parse", "HEAD"], capture=True)
+    short_sha = run_git(["rev-parse", "--short", "HEAD"], capture=True)
+    print(f"[ship] HEAD {short_sha} ({head_sha})")
+
+    if args.skip_build:
+        print("[ship] --skip-build: done.")
+        return 0
+
+    # ── CI ────────────────────────────────────────────────────────────────────
+    run_id = wait_for_push_run(
+        token, owner, repo, args.workflow, branch, head_sha, args.timeout, args.poll
     )
+    wait_for_success(token, owner, repo, run_id, args.timeout, args.poll)
 
-    print("[ship] Waiting for dispatched run to be created...")
-    run_id = wait_for_new_dispatch_run(
-        token=token,
-        owner=owner,
-        repo=repo,
-        workflow_file=args.workflow,
-        branch=branch,
-        started_after=dispatch_time,
-        timeout_seconds=args.timeout,
-        poll_interval_seconds=args.poll_interval,
-    )
-    print(f"[ship] Run ID: {run_id}")
+    # ── IPA ───────────────────────────────────────────────────────────────────
+    print("[ship] Downloading IPA...")
+    art = artifact_id(token, owner, repo, run_id, args.artifact)
+    name = app_name()
+    sha_ipa = REPO_ROOT / "releases" / f"{name}-unsigned-{short_sha}.ipa"
+    latest_ipa = REPO_ROOT / "releases" / f"{name}-unsigned.ipa"
 
-    print("[ship] Waiting for workflow success...")
-    wait_for_run_success(
-        token=token,
-        owner=owner,
-        repo=repo,
-        run_id=run_id,
-        timeout_seconds=args.timeout,
-        poll_interval_seconds=args.poll_interval,
-    )
+    download_ipa(token, owner, repo, art, sha_ipa)
+    shutil.copy2(sha_ipa, latest_ipa)
 
-    print("[ship] Downloading IPA artifact...")
-    artifact_id = get_ios_artifact_id(
-        token=token,
-        owner=owner,
-        repo=repo,
-        run_id=run_id,
-        artifact_name=args.artifact,
-    )
-
-    app_name = sanitize_file_stem(get_app_display_name())
-    output_path = REPO_ROOT / "releases" / f"{app_name}-unsigned.ipa"
-    download_and_extract_ipa(token, owner, repo, artifact_id, output_path)
-    print(f"[ship] IPA saved to: {output_path}")
+    print(f"\n[ship] {sha_ipa.name}")
+    print(f"[ship] {latest_ipa.name}  ← latest")
     return 0
 
 
@@ -338,8 +421,8 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except subprocess.CalledProcessError as exc:
-        print(f"[ship] Command failed: {' '.join(exc.cmd)}", file=sys.stderr)
+        print(f"[ship] git failed: {' '.join(str(a) for a in exc.cmd)}", file=sys.stderr)
         raise SystemExit(exc.returncode)
-    except (RuntimeError, TimeoutError, ValueError, OSError, urllib.error.URLError, zipfile.BadZipFile) as exc:
+    except (RuntimeError, TimeoutError, OSError, urllib.error.URLError, zipfile.BadZipFile) as exc:
         print(f"[ship] {exc}", file=sys.stderr)
         raise SystemExit(1)

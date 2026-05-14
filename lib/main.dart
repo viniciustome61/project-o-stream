@@ -58,7 +58,6 @@ class _SenderScreenState extends State<SenderScreen> {
     latencyMs: 80,
     autoReconnect: true,
     keepScreenOn: true,
-    showSafeAreaGrid: false,
   );
 
   StreamSubscription<Map<String, Object?>>? _events;
@@ -353,7 +352,6 @@ class _SenderScreenState extends State<SenderScreen> {
                   status: _status,
                   live: _live,
                   stats: _stats,
-                  capabilities: _capabilities,
                   version: AppMetadata.version,
                   onVersionTap: () {
                     _versionTaps++;
@@ -364,8 +362,6 @@ class _SenderScreenState extends State<SenderScreen> {
                   },
                 ),
                 const Spacer(),
-                if (_config.showSafeAreaGrid)
-                  const Expanded(child: _CompositionGrid()),
                 _SettingsPanel(
                   config: _config,
                   receiver: _receiver,
@@ -397,9 +393,6 @@ class _SenderScreenState extends State<SenderScreen> {
                     setState(
                         () => _config = _config.copyWith(keepScreenOn: value));
                   },
-                  onGridChanged: (value) => setState(() {
-                    _config = _config.copyWith(showSafeAreaGrid: value);
-                  }),
                 ),
                 Padding(
                   padding: const EdgeInsets.fromLTRB(24, 12, 24, 28),
@@ -580,7 +573,6 @@ class _TopBar extends StatelessWidget {
     required this.status,
     required this.live,
     required this.stats,
-    required this.capabilities,
     required this.version,
     required this.onVersionTap,
   });
@@ -588,7 +580,6 @@ class _TopBar extends StatelessWidget {
   final String status;
   final bool live;
   final String stats;
-  final Map<String, Object?> capabilities;
   final String version;
   final VoidCallback onVersionTap;
 
@@ -625,87 +616,10 @@ class _TopBar extends StatelessWidget {
               ),
             ],
           ),
-          const SizedBox(height: 8),
-          Wrap(
-            spacing: 8,
-            runSpacing: 6,
-            children: [
-              _CapabilityChip(
-                  label: 'SRT Transport', enabled: capabilities['srt'] == true),
-              _CapabilityChip(
-                  label: 'HEVC', enabled: capabilities['hevc'] == true),
-              _CapabilityChip(
-                  label: 'Torch', enabled: capabilities['torch'] == true),
-              _CapabilityChip(
-                  label: 'Native Preview',
-                  enabled: capabilities['preview'] == true),
-            ],
-          ),
         ],
       ),
     );
   }
-}
-
-class _CapabilityChip extends StatelessWidget {
-  const _CapabilityChip({required this.label, required this.enabled});
-
-  final String label;
-  final bool enabled;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
-      decoration: BoxDecoration(
-        color: (enabled ? Colors.green : Colors.white)
-            .withValues(alpha: enabled ? .2 : .1),
-        borderRadius: BorderRadius.circular(999),
-        border:
-            Border.all(color: enabled ? Colors.greenAccent : Colors.white24),
-      ),
-      child: Text(
-        label,
-        style: TextStyle(
-          fontSize: 11,
-          color: enabled ? Colors.greenAccent : Colors.white54,
-          fontWeight: FontWeight.w700,
-        ),
-      ),
-    );
-  }
-}
-
-class _CompositionGrid extends StatelessWidget {
-  const _CompositionGrid();
-
-  @override
-  Widget build(BuildContext context) {
-    return IgnorePointer(
-      child: CustomPaint(
-        painter: _GridPainter(),
-        child: const SizedBox.expand(),
-      ),
-    );
-  }
-}
-
-class _GridPainter extends CustomPainter {
-  @override
-  void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = Colors.white.withValues(alpha: .22)
-      ..strokeWidth = 1;
-    for (final x in [size.width / 3, size.width * 2 / 3]) {
-      canvas.drawLine(Offset(x, 0), Offset(x, size.height), paint);
-    }
-    for (final y in [size.height / 3, size.height * 2 / 3]) {
-      canvas.drawLine(Offset(0, y), Offset(size.width, y), paint);
-    }
-  }
-
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
 
 class _SettingsPanel extends StatelessWidget {
@@ -721,7 +635,6 @@ class _SettingsPanel extends StatelessWidget {
     required this.onMicrophoneChanged,
     required this.onLatencyChanged,
     required this.onKeepScreenOnChanged,
-    required this.onGridChanged,
   });
 
   final SenderConfig config;
@@ -735,7 +648,6 @@ class _SettingsPanel extends StatelessWidget {
   final ValueChanged<bool> onMicrophoneChanged;
   final ValueChanged<double> onLatencyChanged;
   final ValueChanged<bool> onKeepScreenOnChanged;
-  final ValueChanged<bool> onGridChanged;
 
   @override
   Widget build(BuildContext context) {
@@ -807,12 +719,16 @@ class _SettingsPanel extends StatelessWidget {
               const SizedBox(height: 12),
               DropdownButtonFormField<StreamProfile>(
                 initialValue: config.profile,
+                isExpanded: true,
                 decoration: const InputDecoration(labelText: 'Stream profile'),
                 items: [
                   for (final profile in profiles)
                     DropdownMenuItem(
                       value: profile,
-                      child: Text('${profile.name} - ${profile.description}'),
+                      child: Text(
+                        '${profile.name} - ${profile.description}',
+                        overflow: TextOverflow.ellipsis,
+                      ),
                     ),
                 ],
                 onChanged: (profile) {
@@ -855,21 +771,10 @@ class _SettingsPanel extends StatelessWidget {
                   ),
                 ],
               ),
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: [
-                  FilterChip(
-                    label: const Text('Keep screen awake'),
-                    selected: config.keepScreenOn,
-                    onSelected: onKeepScreenOnChanged,
-                  ),
-                  FilterChip(
-                    label: const Text('Rule-of-thirds grid'),
-                    selected: config.showSafeAreaGrid,
-                    onSelected: onGridChanged,
-                  ),
-                ],
+              FilterChip(
+                label: const Text('Keep screen awake'),
+                selected: config.keepScreenOn,
+                onSelected: onKeepScreenOnChanged,
               ),
               const SizedBox(height: 8),
               Align(
