@@ -49,7 +49,22 @@ if (Get-Command tailscale -ErrorAction SilentlyContinue) {
     }
 }
 
-$latencyUs = $LatencyMs * 1000
+# Ensure Windows Firewall allows inbound traffic on the SRT port.
+$fwRuleName = "Project-O-Stream SRT $SrtPort"
+$fwExists = Get-NetFirewallRule -DisplayName $fwRuleName -ErrorAction SilentlyContinue
+if (-not $fwExists) {
+    try {
+        New-NetFirewallRule -DisplayName $fwRuleName -Direction Inbound `
+            -Protocol UDP -LocalPort $SrtPort -Action Allow -ErrorAction Stop | Out-Null
+        New-NetFirewallRule -DisplayName "$fwRuleName TCP" -Direction Inbound `
+            -Protocol TCP -LocalPort $SrtPort -Action Allow -ErrorAction Stop | Out-Null
+        Write-Host "[Receiver] Firewall: opened port $SrtPort UDP+TCP for SRT."
+    } catch {
+        Write-Host "[Receiver] Firewall: could not add rule (run as Administrator to open port $SrtPort): $($_.Exception.Message)"
+    }
+}
+
+$latencyVal = $LatencyMs
 
 if ($Health) {
     [pscustomobject]@{
@@ -63,7 +78,7 @@ if ($Health) {
         discoveryEnabled = -not $NoDiscovery
         directToObs      = [bool]$DirectToObs
         obsInput         = if ($DirectToObs) {
-            "srt://0.0.0.0:$($SrtPort)?mode=listener&latency=$($latencyUs)&pkt_size=1316"
+            "srt://0.0.0.0:$($SrtPort)?mode=listener&latency=$($latencyVal)&pkt_size=1316"
         } else {
             "udp://127.0.0.1:$ObsUdpPort"
         }
@@ -167,7 +182,7 @@ if ($DirectToObs) {
 }
 
 # --- Legacy relay mode (ffmpeg → UDP → OBS) ---
-$inputUrl = "srt://0.0.0.0:$($SrtPort)?mode=listener&transtype=live&latency=$latencyUs&rcvlatency=$latencyUs&peerlatency=$latencyUs&tlpktdrop=1&pkt_size=1316"
+$inputUrl = "srt://0.0.0.0:$($SrtPort)?mode=listener&transtype=live&latency=$latencyVal&rcvlatency=$latencyVal&peerlatency=$latencyVal&tlpktdrop=1&pkt_size=1316"
 $target = "udp://127.0.0.1:$($ObsUdpPort)?pkt_size=1316"
 
 $ffmpegArgs = @(

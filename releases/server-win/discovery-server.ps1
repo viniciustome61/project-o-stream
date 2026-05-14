@@ -13,6 +13,17 @@ if ($tailscale) {
     $tailscaleIp = (& tailscale ip -4 2>$null | Select-Object -First 1)
 }
 
+# Server's own LAN IP — what LAN phones should connect to for SRT.
+# Excludes loopback, APIPA, and Tailscale (100.x) addresses.
+$lanIp = $null
+try {
+    $lanIp = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.IPAddress -notmatch '^(127\.|169\.254\.|100\.)' -and
+            $_.PrefixOrigin -in @('Dhcp', 'Manual')
+        } | Sort-Object PrefixLength -Descending | Select-Object -First 1).IPAddress
+} catch { }
+
 $udp = [System.Net.Sockets.UdpClient]::new($DiscoveryPort)
 $udp.EnableBroadcast = $true
 $udp.Client.ReceiveTimeout = 300
@@ -40,12 +51,24 @@ try {
 }
 
 function New-DiscoveryPayload {
-    param([string]$FallbackHost)
+    param([string]$ProbeSourceIp)
+
+    # Phone on Tailscale (100.x) -> advertise Tailscale IP so SRT goes over Tailnet.
+    # Phone on LAN -> advertise LAN IP so SRT goes direct without Tailscale on the phone.
+    $advertiseHost = if ($tailscaleIp -and $ProbeSourceIp -match '^100\.') {
+        $tailscaleIp
+    } elseif ($lanIp) {
+        $lanIp
+    } elseif ($tailscaleIp) {
+        $tailscaleIp
+    } else {
+        $ProbeSourceIp
+    }
 
     @{
         service = "project-o-stream"
         version = 1
-        host = if ($tailscaleIp) { $tailscaleIp } else { $FallbackHost }
+        host = $advertiseHost
         hostname = $hostname
         srtPort = $SrtPort
         discoveryPort = $DiscoveryPort
@@ -78,7 +101,8 @@ function Get-TailscalePeerIps {
 }
 
 function Send-OffersToPeers {
-    $payload = [System.Text.Encoding]::UTF8.GetBytes((New-DiscoveryPayload -FallbackHost "127.0.0.1"))
+    # Peers are on the Tailnet so they should always connect via Tailscale IP.
+    $payload = [System.Text.Encoding]::UTF8.GetBytes((New-DiscoveryPayload -ProbeSourceIp "100.0.0.1"))
     foreach ($peerIp in (Get-TailscalePeerIps)) {
         try {
             [void]$pulseUdp.Send($payload, $payload.Length, $peerIp, $ClientDiscoveryPort)
@@ -90,12 +114,9 @@ function Send-OffersToPeers {
 
 Write-Host "Discovery listening on UDP 0.0.0.0:$DiscoveryPort"
 Write-Host "Discovery offers sent to Tailscale peers on UDP $ClientDiscoveryPort"
-if ($tailscaleIp) {
-    Write-Host "Advertising Tailscale IP $tailscaleIp and SRT port $SrtPort"
-}
-if ($conflictUdp) {
-    Write-Host "Conflict detection active on UDP $ClientDiscoveryPort (warn only)"
-}
+if ($lanIp)       { Write-Host "Advertising LAN IP      $lanIp (for phones on WiFi)" }
+if ($tailscaleIp) { Write-Host "Advertising Tailscale IP $tailscaleIp (for Tailscale peers)" }
+if ($conflictUdp) { Write-Host "Conflict detection active on UDP $ClientDiscoveryPort (warn only)" }
 
 $shouldStop = $false
 try {
@@ -106,7 +127,7 @@ try {
             $bytes = $udp.Receive([ref]$endpoint)
             $message = [System.Text.Encoding]::UTF8.GetString($bytes)
             if ($message -eq "PROJECTO_STREAM_DISCOVER") {
-                $payload = New-DiscoveryPayload -FallbackHost $endpoint.Address.ToString()
+                $payload = New-DiscoveryPayload -ProbeSourceIp $endpoint.Address.ToString()
                 $reply = [System.Text.Encoding]::UTF8.GetBytes($payload)
                 [void]$udp.Send($reply, $reply.Length, $endpoint)
             }

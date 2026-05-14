@@ -186,10 +186,15 @@ class _SenderScreenState extends State<SenderScreen> {
   }
 
   Future<void> _discover() async {
+    _dbg('Searching receiver...');
     setState(() => _status = 'Searching receiver');
     final receiver = await ReceiverDiscovery.find(cachedHost: _config.host);
-    if (receiver == null) return;
+    if (receiver == null) {
+      _dbg('No receiver found.');
+      return;
+    }
     _receiver = receiver;
+    _dbg('Receiver found: ${receiver.label}');
     await _saveHost(receiver.host, receiver.srtPort);
     setState(() => _status = 'Receiver ${receiver.label}');
   }
@@ -197,8 +202,12 @@ class _SenderScreenState extends State<SenderScreen> {
   void _handleNativeEvent(Map<String, Object?> event) {
     _dbg('native event: $event');
     final nextLive = event['live'] == true;
+    final status = event['status']?.toString();
+    if (status != null) {
+      _dbg('Status change: $status');
+    }
     setState(() {
-      _status = event['status']?.toString() ?? _status;
+      _status = status ?? _status;
       _stats = event['stats']?.toString() ?? _stats;
       _live = nextLive;
     });
@@ -246,7 +255,12 @@ class _SenderScreenState extends State<SenderScreen> {
         _status = 'Live';
       });
     } catch (error) {
-      setState(() => _status = 'Stream error: $error');
+      String msg = error.toString();
+      if (error is PlatformException) {
+        msg = error.message ?? error.code;
+      }
+      _dbg('Stream error: $msg');
+      setState(() => _status = 'Stream error: $msg');
       if (_config.autoReconnect) {
         _scheduleAutoConnect();
       }
@@ -353,6 +367,7 @@ class _SenderScreenState extends State<SenderScreen> {
                   live: _live,
                   stats: _stats,
                   version: AppMetadata.version,
+                  onLogTap: () => setState(() => _showDebug = !_showDebug),
                   onVersionTap: () {
                     _versionTaps++;
                     if (_versionTaps >= 5) {
@@ -575,6 +590,7 @@ class _TopBar extends StatelessWidget {
     required this.stats,
     required this.version,
     required this.onVersionTap,
+    required this.onLogTap,
   });
 
   final String status;
@@ -582,6 +598,7 @@ class _TopBar extends StatelessWidget {
   final String stats;
   final String version;
   final VoidCallback onVersionTap;
+  final VoidCallback onLogTap;
 
   @override
   Widget build(BuildContext context) {
@@ -609,6 +626,20 @@ class _TopBar extends StatelessWidget {
                   style: const TextStyle(fontWeight: FontWeight.w700),
                 ),
               ),
+              const SizedBox(width: 8),
+              TextButton(
+                onPressed: onLogTap,
+                style: TextButton.styleFrom(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  minimumSize: Size.zero,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  backgroundColor: Colors.white10,
+                ),
+                child: const Text('LOG',
+                    style: TextStyle(fontSize: 10, color: Colors.white70)),
+              ),
+              const SizedBox(width: 12),
               GestureDetector(
                 onTap: onVersionTap,
                 child: Text(version,

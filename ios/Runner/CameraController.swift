@@ -107,7 +107,7 @@ final class CameraController: NSObject {
         let width = profile?["width"] as? Int ?? 3840
         let height = profile?["height"] as? Int ?? 2160
         let bitrate = profile?["bitrate"] as? Int ?? 12_000_000
-        let latencyUs = latencyMs * 1000
+        let latency = latencyMs
 
         let connection = SRTConnection()
         let stream = SRTStream(connection: connection)
@@ -128,7 +128,7 @@ final class CameraController: NSObject {
         }
         await mixer.addOutput(stream)
 
-        let urlString = "srt://\(host):\(port)?mode=caller&transtype=live&latency=\(latencyUs)&tlpktdrop=1&pkt_size=1316"
+        let urlString = "srt://\(host):\(port)?mode=caller&transtype=live&latency=\(latency)&tlpktdrop=1&pkt_size=1316"
         guard let url = URL(string: urlString) else {
             throw StreamError.invalidArguments
         }

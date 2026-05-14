@@ -152,8 +152,8 @@ def wait_for_push_run(
                 if run.get("head_sha") == head_sha:
                     print(f" → run {run['id']}")
                     return int(run["id"])
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"\n[ship] poll error: {exc}", flush=True)
         print(".", end="", flush=True)
         time.sleep(poll)
     print()
@@ -190,13 +190,30 @@ def artifact_id(token: str, owner: str, repo: str, run_id: int, name: str) -> in
     raise RuntimeError(f"Artifact '{name}' not found in run {run_id}.")
 
 
+class _DropAuthOnRedirect(urllib.request.HTTPRedirectHandler):
+    """Follow GitHub's 302 redirects to Azure without forwarding the Authorization header."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new_req is not None and "github.com" not in urllib.parse.urlparse(newurl).netloc:
+            new_req.headers.pop("Authorization", None)
+            new_req.unredirected_hdrs.pop("Authorization", None)
+        return new_req
+
+
 def download_ipa(token: str, owner: str, repo: str, art_id: int, dest: Path) -> None:
-    raw = gh(token, "GET", f"/repos/{owner}/{repo}/actions/artifacts/{art_id}/zip",
-             ok={200, 302}, raw=True)
-    assert isinstance(raw, bytes)
+    url = f"{API_BASE}/repos/{owner}/{repo}/actions/artifacts/{art_id}/zip"
+    req = urllib.request.Request(url, headers={
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    })
+    opener = urllib.request.build_opener(_DropAuthOnRedirect())
+    with opener.open(req) as resp:
+        data = resp.read()
     dest.parent.mkdir(parents=True, exist_ok=True)
     zp = dest.with_suffix(".zip")
-    zp.write_bytes(raw)
+    zp.write_bytes(data)
     try:
         with zipfile.ZipFile(zp) as zf:
             ipas = [n for n in zf.namelist() if n.lower().endswith(".ipa")]
@@ -219,6 +236,15 @@ def _extract_json(text: str) -> dict:
         return json.loads(text[start : end + 1])
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"Invalid JSON from Gemini ({exc}):\n{text[:400]}") from exc
+
+
+def _gemini_exe() -> str:
+    """Resolve the gemini CLI executable (handles Windows .CMD wrappers)."""
+    import shutil
+    path = shutil.which("gemini")
+    if not path:
+        raise FileNotFoundError("gemini CLI not found in PATH")
+    return path
 
 
 def gemini_commits(diff: str, files: list[str]) -> list[dict]:
@@ -253,7 +279,7 @@ Git diff:
 
     env = {**os.environ, "GEMINI_CLI_TRUST_WORKSPACE": "true"}
     result = subprocess.run(
-        ["gemini", "-p", "Return the JSON object as instructed. No markdown, no extra text."],
+        [_gemini_exe(), "-p", "Return the JSON object as instructed. No markdown, no extra text."],
         input=stdin_prompt,
         capture_output=True,
         text=True,
@@ -358,6 +384,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--skip-commit", action="store_true")
     p.add_argument("--skip-build", action="store_true",
                    help="Commit + push only; skip CI wait and IPA download.")
+    p.add_argument("--run-id", type=int, default=None,
+                   help="Skip commit/push/wait; download IPA from this completed run ID.")
     p.add_argument("--timeout", type=int, default=3600)
     p.add_argument("--poll", type=int, default=10)
     return p.parse_args()
@@ -371,6 +399,21 @@ def main() -> int:
     branch = current_branch(args.branch)
 
     print(f"[ship] {owner}/{repo}  branch={branch}")
+
+    # ── shortcut: download IPA from a known run ───────────────────────────────
+    if args.run_id:
+        print(f"[ship] --run-id {args.run_id}: skipping commit/push/wait.")
+        short_sha = run_git(["rev-parse", "--short", "HEAD"], capture=True)
+        print("[ship] Downloading IPA...")
+        art = artifact_id(token, owner, repo, args.run_id, args.artifact)
+        name = app_name()
+        sha_ipa = REPO_ROOT / "releases" / f"{name}-unsigned-{short_sha}.ipa"
+        latest_ipa = REPO_ROOT / "releases" / f"{name}-unsigned.ipa"
+        download_ipa(token, owner, repo, art, sha_ipa)
+        shutil.copy2(sha_ipa, latest_ipa)
+        print(f"\n[ship] {sha_ipa.name}")
+        print(f"[ship] {latest_ipa.name}  <- latest")
+        return 0
 
     # ── commit ────────────────────────────────────────────────────────────────
     if not args.skip_commit:
@@ -413,7 +456,7 @@ def main() -> int:
     shutil.copy2(sha_ipa, latest_ipa)
 
     print(f"\n[ship] {sha_ipa.name}")
-    print(f"[ship] {latest_ipa.name}  ← latest")
+    print(f"[ship] {latest_ipa.name}  <- latest")
     return 0
 
 

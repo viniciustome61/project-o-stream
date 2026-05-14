@@ -36,6 +36,21 @@ if (Get-Command tailscale -ErrorAction SilentlyContinue) {
     $tailscaleIp = (& tailscale ip -4 2>$null | Select-Object -First 1)
 }
 
+# Ensure Windows Firewall allows inbound traffic on the SRT port.
+$fwRuleName = "Project-O-Stream SRT $SrtPort"
+$fwExists = Get-NetFirewallRule -DisplayName $fwRuleName -ErrorAction SilentlyContinue
+if (-not $fwExists) {
+    try {
+        New-NetFirewallRule -DisplayName $fwRuleName -Direction Inbound `
+            -Protocol UDP -LocalPort $SrtPort -Action Allow -ErrorAction Stop | Out-Null
+        New-NetFirewallRule -DisplayName "$fwRuleName TCP" -Direction Inbound `
+            -Protocol TCP -LocalPort $SrtPort -Action Allow -ErrorAction Stop | Out-Null
+        Write-Host "[Receiver] Firewall: opened port $SrtPort UDP+TCP for SRT."
+    } catch {
+        Write-Host "[Receiver] Firewall: could not add rule (run as Administrator to open port $SrtPort): $($_.Exception.Message)"
+    }
+}
+
 $discoveryJob = $null
 $discoveryScript = Join-Path $scriptRoot "discovery-server.ps1"
 $lastDiscoveryRestart = (Get-Date).AddSeconds(-10)
