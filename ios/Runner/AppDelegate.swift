@@ -3,7 +3,7 @@ import Flutter
 import UIKit
 
 @UIApplicationMain
-class AppDelegate: FlutterAppDelegate, FlutterStreamHandler, FlutterImplicitEngineDelegate {
+class AppDelegate: FlutterAppDelegate, FlutterStreamHandler {
     var eventSink: FlutterEventSink?
     private var methodChannel: FlutterMethodChannel?
     private var eventChannel: FlutterEventChannel?
@@ -23,12 +23,6 @@ class AppDelegate: FlutterAppDelegate, FlutterStreamHandler, FlutterImplicitEngi
             self?.installNativeBridgeWhenFlutterViewIsReady()
         }
         return launched
-    }
-
-    func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
-        print("[PO] implicit Flutter engine initialized")
-        GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
-        registerNativeBridge(messenger: engineBridge.applicationRegistrar.messenger())
     }
 
     func registerNativeBridge(messenger: FlutterBinaryMessenger) {
