@@ -94,12 +94,13 @@ if ($tailscaleIp) {
     Write-Host "Advertising Tailscale IP $tailscaleIp and SRT port $SrtPort"
 }
 if ($conflictUdp) {
-    Write-Host "Conflict detection active on UDP $ClientDiscoveryPort"
+    Write-Host "Conflict detection active on UDP $ClientDiscoveryPort (warn only)"
 }
 
 $shouldStop = $false
 try {
     $lastPulse = (Get-Date).AddSeconds(-10)
+    $lastConflictWarning = (Get-Date).AddSeconds(-60)
     while (-not $shouldStop) {
         try {
             $bytes = $udp.Receive([ref]$endpoint)
@@ -125,15 +126,16 @@ try {
                             -and $tailscaleIp `
                             -and $offer.host `
                             -and $offer.host -ne $tailscaleIp) {
-                        $peerName = if ($offer.hostname) { $offer.hostname } else { $conflictEndpoint.Address.ToString() }
-                        Write-Host ""
-                        Write-Host "=== RECEIVER CONFLICT DETECTED ==="
-                        Write-Host "  Another Project O receiver is active on this network:"
-                        Write-Host "  Peer     : $peerName ($($conflictEndpoint.Address.ToString()))"
-                        Write-Host "  Reason   : Duplicate receivers split incoming sessions on the same Tailnet."
-                        Write-Host "  Action   : Shutting down. Keep only one receiver active at a time."
-                        Write-Host "==================================="
-                        $shouldStop = $true
+                        if (((Get-Date) - $lastConflictWarning).TotalSeconds -ge 30) {
+                            $peerName = if ($offer.hostname) { $offer.hostname } else { $conflictEndpoint.Address.ToString() }
+                            Write-Host ""
+                            Write-Host "=== RECEIVER CONFLICT WARNING ==="
+                            Write-Host "  Another Project O receiver advertised on this Tailnet:"
+                            Write-Host "  Peer     : $peerName ($($conflictEndpoint.Address.ToString()))"
+                            Write-Host "  Action   : Keeping this receiver alive; stop the other one if mobile selects the wrong host."
+                            Write-Host "================================="
+                            $lastConflictWarning = Get-Date
+                        }
                     }
                 } catch { }
             } catch [System.Net.Sockets.SocketException] {

@@ -131,6 +131,12 @@ class AppDelegate: FlutterAppDelegate, FlutterStreamHandler {
         bootOverlayLabel?.text = "\(status) | iOS \(UIDevice.current.systemVersion) | v\(version)"
     }
 
+    private func removeBootOverlay() {
+        bootOverlay?.removeFromSuperview()
+        bootOverlay = nil
+        bootOverlayLabel = nil
+    }
+
     func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
         eventSink = events
         return nil
@@ -157,7 +163,7 @@ class AppDelegate: FlutterAppDelegate, FlutterStreamHandler {
                     }
                 case "flutterRendered":
                     print("[PO] Flutter reported first rendered frame")
-                    updateBootOverlay("flutter frame rendered")
+                    removeBootOverlay()
                     result(nil)
                 case "startPreview":
                     print("[PO] startPreview() called")

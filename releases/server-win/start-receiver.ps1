@@ -39,10 +39,56 @@ $target = "udp://127.0.0.1:$($ObsUdpPort)?pkt_size=1316"
 $obsInput = "udp://127.0.0.1:$ObsUdpPort"
 
 $discoveryJob = $null
-if (-not $NoDiscovery) {
-    $discoveryScript = Join-Path $scriptRoot "discovery-server.ps1"
-    $discoveryJob = Start-Job -FilePath $discoveryScript -ArgumentList 7071, $SrtPort, $ObsUdpPort, 7072
+$discoveryScript = Join-Path $scriptRoot "discovery-server.ps1"
+$lastDiscoveryRestart = (Get-Date).AddSeconds(-10)
+
+function Write-DiscoveryJobOutput {
+    param($Job)
+    if (-not $Job) { return }
+    $messages = Receive-Job $Job -ErrorAction SilentlyContinue 2>&1
+    if ($messages) {
+        $messages | Where-Object { $_ } | ForEach-Object { Write-Host $_ }
+    }
 }
+
+function Start-DiscoveryJob {
+    if ($NoDiscovery) { return }
+    if (-not (Test-Path -LiteralPath $discoveryScript)) {
+        Write-Host "[Receiver] Discovery script not found: $discoveryScript"
+        return
+    }
+
+    try {
+        $script:discoveryJob = Start-Job -FilePath $discoveryScript -ArgumentList 7071, $SrtPort, $ObsUdpPort, 7072
+        $script:lastDiscoveryRestart = Get-Date
+    } catch {
+        Write-Host "[Receiver] Discovery server failed to start: $($_.Exception.Message)"
+        $script:lastDiscoveryRestart = Get-Date
+    }
+}
+
+function Ensure-DiscoveryRunning {
+    if ($NoDiscovery) { return }
+    if ($script:discoveryJob -and $script:discoveryJob.State -eq 'Running') {
+        Write-DiscoveryJobOutput $script:discoveryJob
+        return
+    }
+
+    if ($script:discoveryJob) {
+        Write-DiscoveryJobOutput $script:discoveryJob
+        Write-Host "[Receiver] Discovery server stopped ($($script:discoveryJob.State)); restarting discovery only."
+        Remove-Job $script:discoveryJob -Force -ErrorAction SilentlyContinue
+        $script:discoveryJob = $null
+    }
+
+    if (((Get-Date) - $script:lastDiscoveryRestart).TotalSeconds -lt 2) {
+        return
+    }
+
+    Start-DiscoveryJob
+}
+
+Start-DiscoveryJob
 
 Write-Host ""
 Write-Host "========================================"
@@ -71,32 +117,14 @@ $ffmpegArgs = @(
 $proc = $null
 try {
     while ($true) {
-        if ($discoveryJob -and $discoveryJob.State -ne 'Running') {
-            $out = Receive-Job $discoveryJob -ErrorAction SilentlyContinue
-            Write-Host ""
-            if ($out) { $out | Where-Object { $_ } | ForEach-Object { Write-Host $_ } }
-            Write-Host "[Receiver] Discovery server stopped - halting receiver."
-            break
-        }
+        Ensure-DiscoveryRunning
 
         Write-Host "[Receiver] Waiting for SRT caller on UDP $SrtPort..."
         $proc = Start-Process -FilePath $ffmpegPath -ArgumentList $ffmpegArgs -PassThru -NoNewWindow
 
         while (-not $proc.HasExited) {
             Start-Sleep -Milliseconds 400
-
-            if ($discoveryJob -and $discoveryJob.State -ne 'Running') {
-                $out = Receive-Job $discoveryJob -ErrorAction SilentlyContinue
-                Write-Host ""
-                if ($out) { $out | Where-Object { $_ } | ForEach-Object { Write-Host $_ } }
-                Write-Host "[Receiver] Discovery server stopped - halting receiver."
-                if (-not $proc.HasExited) { $proc.Kill() }
-                break
-            }
-        }
-
-        if ($discoveryJob -and $discoveryJob.State -ne 'Running') {
-            break
+            Ensure-DiscoveryRunning
         }
 
         $exitCode = $proc.ExitCode
@@ -108,8 +136,7 @@ try {
 } finally {
     if ($proc -and -not $proc.HasExited) { $proc.Kill(); $proc.WaitForExit(2000) | Out-Null }
     if ($discoveryJob) {
-        $out = Receive-Job $discoveryJob -ErrorAction SilentlyContinue
-        if ($out) { $out | Where-Object { $_ } | ForEach-Object { Write-Host $_ } }
+        Write-DiscoveryJobOutput $discoveryJob
         Stop-Job $discoveryJob -ErrorAction SilentlyContinue
         Remove-Job $discoveryJob -Force -ErrorAction SilentlyContinue
     }

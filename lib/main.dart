@@ -75,6 +75,7 @@ class _SenderScreenState extends State<SenderScreen> {
   // ── debug overlay ──────────────────────────────────────────────
   final List<String> _log = [];
   bool _showDebug = false;
+  bool _settingsExpanded = true;
   int _versionTaps = 0;
 
   void _dbg(String msg) {
@@ -330,6 +331,10 @@ class _SenderScreenState extends State<SenderScreen> {
                   config: _config,
                   receiver: _receiver,
                   capabilities: _capabilities,
+                  expanded: _settingsExpanded,
+                  onToggleExpanded: () {
+                    setState(() => _settingsExpanded = !_settingsExpanded);
+                  },
                   onDiscover: () async {
                     await _discover();
                     await _ensureLive();
@@ -664,6 +669,8 @@ class _SettingsPanel extends StatelessWidget {
     required this.config,
     required this.receiver,
     required this.capabilities,
+    required this.expanded,
+    required this.onToggleExpanded,
     required this.onDiscover,
     required this.onProfileChanged,
     required this.onCodecChanged,
@@ -676,6 +683,8 @@ class _SettingsPanel extends StatelessWidget {
   final SenderConfig config;
   final DiscoveredReceiver? receiver;
   final Map<String, Object?> capabilities;
+  final bool expanded;
+  final VoidCallback onToggleExpanded;
   final Future<void> Function() onDiscover;
   final ValueChanged<StreamProfile> onProfileChanged;
   final ValueChanged<bool> onCodecChanged;
@@ -688,123 +697,150 @@ class _SettingsPanel extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 16),
-      padding: const EdgeInsets.all(14),
+      padding: EdgeInsets.fromLTRB(14, 10, 10, expanded ? 14 : 10),
       decoration: BoxDecoration(
         color: Colors.black.withValues(alpha: .58),
         borderRadius: BorderRadius.circular(12),
         border: Border.all(color: Colors.white12),
       ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Row(
-            children: [
-              Expanded(
+      child: AnimatedSize(
+        duration: const Duration(milliseconds: 180),
+        curve: Curves.easeOutCubic,
+        alignment: Alignment.topCenter,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    receiver == null
+                        ? 'Receiver: searching'
+                        : 'Receiver: ${receiver!.label}',
+                    maxLines: expanded ? 2 : 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                IconButton(
+                  onPressed: () => unawaited(onDiscover()),
+                  icon: const Icon(Icons.radar),
+                  tooltip: 'Discover receiver',
+                ),
+                IconButton.filledTonal(
+                  onPressed: onToggleExpanded,
+                  icon: Icon(
+                    expanded ? Icons.keyboard_arrow_down : Icons.settings,
+                  ),
+                  tooltip: expanded ? 'Minimize settings' : 'Show settings',
+                ),
+              ],
+            ),
+            if (!expanded)
+              Align(
+                alignment: Alignment.centerLeft,
                 child: Text(
-                  receiver == null
-                      ? 'Receiver: searching'
-                      : 'Receiver: ${receiver!.label}',
-                  maxLines: 2,
+                  '${config.profile.name} | ${config.latencyMs} ms | ${config.useHevc ? 'HEVC' : 'H.264'}',
+                  maxLines: 1,
                   overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context)
+                      .textTheme
+                      .labelSmall
+                      ?.copyWith(color: Colors.white60),
                 ),
               ),
-              IconButton(
-                onPressed: () => unawaited(onDiscover()),
-                icon: const Icon(Icons.radar),
-                tooltip: 'Discover receiver',
-              ),
-            ],
-          ),
-          if (receiver != null)
-            Align(
-              alignment: Alignment.centerLeft,
-              child: Text(
-                receiver!.details,
-                style: Theme.of(context)
-                    .textTheme
-                    .labelSmall
-                    ?.copyWith(color: Colors.white70),
-              ),
-            ),
-          const SizedBox(height: 12),
-          DropdownButtonFormField<StreamProfile>(
-            initialValue: config.profile,
-            decoration: const InputDecoration(labelText: 'Stream profile'),
-            items: [
-              for (final profile in profiles)
-                DropdownMenuItem(
-                  value: profile,
-                  child: Text('${profile.name} - ${profile.description}'),
+            if (expanded) ...[
+              if (receiver != null)
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    receiver!.details,
+                    style: Theme.of(context)
+                        .textTheme
+                        .labelSmall
+                        ?.copyWith(color: Colors.white70),
+                  ),
                 ),
-            ],
-            onChanged: (profile) {
-              if (profile != null) onProfileChanged(profile);
-            },
-          ),
-          const SizedBox(height: 10),
-          Row(
-            children: [
-              Expanded(
-                child: SwitchListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('HEVC'),
-                  value: config.useHevc,
-                  onChanged: onCodecChanged,
+              const SizedBox(height: 12),
+              DropdownButtonFormField<StreamProfile>(
+                initialValue: config.profile,
+                decoration: const InputDecoration(labelText: 'Stream profile'),
+                items: [
+                  for (final profile in profiles)
+                    DropdownMenuItem(
+                      value: profile,
+                      child: Text('${profile.name} - ${profile.description}'),
+                    ),
+                ],
+                onChanged: (profile) {
+                  if (profile != null) onProfileChanged(profile);
+                },
+              ),
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  Expanded(
+                    child: SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('HEVC'),
+                      value: config.useHevc,
+                      onChanged: onCodecChanged,
+                    ),
+                  ),
+                  Expanded(
+                    child: SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('Mic'),
+                      value: config.microphone,
+                      onChanged: onMicrophoneChanged,
+                    ),
+                  ),
+                ],
+              ),
+              Row(
+                children: [
+                  const Text('SRT latency'),
+                  Expanded(
+                    child: Slider(
+                      value: config.latencyMs.toDouble(),
+                      min: 40,
+                      max: 240,
+                      divisions: 10,
+                      label: '${config.latencyMs} ms',
+                      onChanged: onLatencyChanged,
+                    ),
+                  ),
+                ],
+              ),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  FilterChip(
+                    label: const Text('Keep screen awake'),
+                    selected: config.keepScreenOn,
+                    onSelected: onKeepScreenOnChanged,
+                  ),
+                  FilterChip(
+                    label: const Text('Rule-of-thirds grid'),
+                    selected: config.showSafeAreaGrid,
+                    onSelected: onGridChanged,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  'Platform: ${capabilities['platform'] ?? 'unknown'} | Transport: ${capabilities['transportStatus'] ?? 'checking'}',
+                  style: Theme.of(context)
+                      .textTheme
+                      .labelSmall
+                      ?.copyWith(color: Colors.white60),
                 ),
               ),
-              Expanded(
-                child: SwitchListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('Mic'),
-                  value: config.microphone,
-                  onChanged: onMicrophoneChanged,
-                ),
-              ),
             ],
-          ),
-          Row(
-            children: [
-              const Text('SRT latency'),
-              Expanded(
-                child: Slider(
-                  value: config.latencyMs.toDouble(),
-                  min: 40,
-                  max: 240,
-                  divisions: 10,
-                  label: '${config.latencyMs} ms',
-                  onChanged: onLatencyChanged,
-                ),
-              ),
-            ],
-          ),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              FilterChip(
-                label: const Text('Keep screen awake'),
-                selected: config.keepScreenOn,
-                onSelected: onKeepScreenOnChanged,
-              ),
-              FilterChip(
-                label: const Text('Rule-of-thirds grid'),
-                selected: config.showSafeAreaGrid,
-                onSelected: onGridChanged,
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          Align(
-            alignment: Alignment.centerLeft,
-            child: Text(
-              'Platform: ${capabilities['platform'] ?? 'unknown'} | Transport: ${capabilities['transportStatus'] ?? 'checking'}',
-              style: Theme.of(context)
-                  .textTheme
-                  .labelSmall
-                  ?.copyWith(color: Colors.white60),
-            ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
