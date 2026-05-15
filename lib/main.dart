@@ -706,35 +706,8 @@ class _SenderScreenState extends State<SenderScreen> {
           // ──────────────────────────────────────────────────────
           if (_locked)
             Positioned.fill(
-              child: AbsorbPointer(
-                child: Container(
-                  color: Colors.black.withValues(alpha: .78),
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(
-                        Icons.lock,
-                        size: 72,
-                        color: Colors.white.withValues(alpha: .9),
-                      ),
-                      const SizedBox(height: 16),
-                      const Text(
-                        'LOCKED',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 22,
-                          fontWeight: FontWeight.w900,
-                          letterSpacing: 4,
-                        ),
-                      ),
-                      const SizedBox(height: 10),
-                      const Text(
-                        'Vol ↓ + Vol ↑  to unlock',
-                        style: TextStyle(color: Colors.white54, fontSize: 13),
-                      ),
-                    ],
-                  ),
-                ),
+              child: _LockOverlay(
+                onUnlock: () => setState(() => _locked = false),
               ),
             ),
         ],
@@ -906,7 +879,7 @@ class _TopBar extends StatelessWidget {
                   child: Icon(
                     locked ? Icons.lock : Icons.lock_open_outlined,
                     size: 14,
-                    color: locked ? Colors.orangeAccent : Colors.white70,
+                    color: locked ? Colors.orangeAccent : Colors.white54,
                   ),
                 ),
               ),
@@ -1385,6 +1358,220 @@ class _StatusChip extends StatelessWidget {
     );
   }
 }
+
+// ── Lock overlay with swipe-to-unlock animation ───────────────────────────
+
+class _LockOverlay extends StatefulWidget {
+  const _LockOverlay({required this.onUnlock});
+  final VoidCallback onUnlock;
+
+  @override
+  State<_LockOverlay> createState() => _LockOverlayState();
+}
+
+class _LockOverlayState extends State<_LockOverlay>
+    with TickerProviderStateMixin {
+  static const _threshold = 90.0;
+
+  double _dragDy = 0;
+  bool _unlocking = false;
+
+  late final AnimationController _unlockCtrl;
+  late final Animation<double> _overlayFade;
+  late final Animation<double> _iconPulse;
+  late final Animation<double> _ringGlow;
+
+  late final AnimationController _snapCtrl;
+  late final Animation<double> _snapAnim;
+  double _snapStart = 0;
+
+  @override
+  void initState() {
+    super.initState();
+
+    _unlockCtrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 540),
+    )..addStatusListener((s) {
+        if (s == AnimationStatus.completed) widget.onUnlock();
+      });
+
+    _overlayFade = Tween<double>(begin: 1, end: 0).animate(
+      CurvedAnimation(
+        parent: _unlockCtrl,
+        curve: const Interval(0.45, 1, curve: Curves.easeOut),
+      ),
+    );
+    _iconPulse = TweenSequence<double>([
+      TweenSequenceItem(tween: Tween(begin: 1.0, end: 1.55), weight: 28),
+      TweenSequenceItem(tween: Tween(begin: 1.55, end: 0.88), weight: 22),
+      TweenSequenceItem(tween: Tween(begin: 0.88, end: 1.18), weight: 25),
+      TweenSequenceItem(tween: Tween(begin: 1.18, end: 1.0), weight: 25),
+    ]).animate(CurvedAnimation(parent: _unlockCtrl, curve: Curves.easeInOut));
+    _ringGlow = Tween<double>(begin: 1, end: 2.6).animate(
+      CurvedAnimation(
+        parent: _unlockCtrl,
+        curve: const Interval(0, 0.45, curve: Curves.easeOut),
+      ),
+    );
+
+    _snapCtrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 380),
+    )..addListener(() {
+        if (mounted) {
+          setState(() {
+            _dragDy = _snapStart * (1 - _snapAnim.value);
+          });
+        }
+      });
+    _snapAnim = CurvedAnimation(parent: _snapCtrl, curve: Curves.elasticOut);
+  }
+
+  @override
+  void dispose() {
+    _unlockCtrl.dispose();
+    _snapCtrl.dispose();
+    super.dispose();
+  }
+
+  double get _progress => (_dragDy.abs() / _threshold).clamp(0, 1);
+
+  void _onDragUpdate(DragUpdateDetails d) {
+    if (_unlocking) return;
+    _snapCtrl.stop();
+    setState(() {
+      _dragDy = (_dragDy + d.delta.dy).clamp(-_threshold * 1.3, 0);
+    });
+    if (_dragDy <= -_threshold) _triggerUnlock();
+  }
+
+  void _onDragEnd(DragEndDetails _) {
+    if (_unlocking) return;
+    _snapStart = _dragDy;
+    _snapCtrl.forward(from: 0);
+  }
+
+  void _triggerUnlock() {
+    if (_unlocking) return;
+    _snapCtrl.stop();
+    setState(() => _unlocking = true);
+    _unlockCtrl.forward();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: Listenable.merge([_unlockCtrl, _snapCtrl]),
+      builder: (context, _) {
+        final progress = _unlocking ? 1.0 : _progress;
+        final yOffset = _unlocking
+            ? -_threshold - _unlockCtrl.value * 40
+            : _dragDy;
+        final ringColor =
+            Color.lerp(Colors.white38, Colors.greenAccent, progress)!;
+
+        return Opacity(
+          opacity: _unlocking ? _overlayFade.value : 1.0,
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            child: Container(
+              color: Colors.black.withValues(alpha: .84),
+              child: Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    GestureDetector(
+                      onVerticalDragUpdate: _onDragUpdate,
+                      onVerticalDragEnd: _onDragEnd,
+                      child: Transform.translate(
+                        offset: Offset(0, yOffset),
+                        child: Stack(
+                          alignment: Alignment.center,
+                          children: [
+                            // Outer glow ring on unlock
+                            if (_unlocking)
+                              Transform.scale(
+                                scale: _ringGlow.value,
+                                child: SizedBox(
+                                  width: 110,
+                                  height: 110,
+                                  child: CircularProgressIndicator(
+                                    value: 1,
+                                    strokeWidth: 3,
+                                    valueColor: AlwaysStoppedAnimation(
+                                      Colors.greenAccent
+                                          .withValues(alpha: 1 - _unlockCtrl.value),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            // Progress ring
+                            SizedBox(
+                              width: 110,
+                              height: 110,
+                              child: CircularProgressIndicator(
+                                value: progress,
+                                strokeWidth: 3,
+                                backgroundColor: Colors.white12,
+                                valueColor: AlwaysStoppedAnimation(ringColor),
+                              ),
+                            ),
+                            // Lock icon
+                            Transform.scale(
+                              scale: _unlocking
+                                  ? _iconPulse.value
+                                  : 1.0 + progress * 0.14,
+                              child: Icon(
+                                _unlocking ? Icons.lock_open : Icons.lock,
+                                size: 68,
+                                color: Color.lerp(
+                                  Colors.white.withValues(alpha: .9),
+                                  Colors.greenAccent,
+                                  progress,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 36),
+                    AnimatedOpacity(
+                      opacity: _unlocking ? 0 : 1 - progress * 0.6,
+                      duration: const Duration(milliseconds: 120),
+                      child: const Column(
+                        children: [
+                          Text(
+                            'LOCKED',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 22,
+                              fontWeight: FontWeight.w900,
+                              letterSpacing: 4,
+                            ),
+                          ),
+                          SizedBox(height: 8),
+                          Text(
+                            'Swipe up to unlock',
+                            style:
+                                TextStyle(color: Colors.white54, fontSize: 13),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 class _ToggleTile extends StatelessWidget {
   const _ToggleTile({
