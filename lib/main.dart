@@ -77,6 +77,11 @@ class _SenderScreenState extends State<SenderScreen> {
   static const _maxAutoReconnectDelay = Duration(seconds: 15);
   Duration _autoReconnectDelay = _minAutoReconnectDelay;
 
+  // ── interface lock ─────────────────────────────────────────────
+  bool _locked = false;
+  bool _volDownHeld = false;
+  bool _volUpHeld = false;
+
   // ── debug overlay ──────────────────────────────────────────────
   final List<String> _log = [];
   bool _showDebug = false;
@@ -103,14 +108,41 @@ class _SenderScreenState extends State<SenderScreen> {
       }));
     });
     _events = NativeStreamer.events.listen(_handleNativeEvent);
+    HardwareKeyboard.instance.addHandler(_handleVolumeKey);
     _boot();
   }
 
   @override
   void dispose() {
+    HardwareKeyboard.instance.removeHandler(_handleVolumeKey);
     _autoConnectTimer?.cancel();
     _events?.cancel();
     super.dispose();
+  }
+
+  bool _handleVolumeKey(KeyEvent event) {
+    final key = event.logicalKey;
+    final isDown = key == LogicalKeyboardKey.audioVolumeDown;
+    final isUp = key == LogicalKeyboardKey.audioVolumeUp;
+    if (!isDown && !isUp) return false;
+
+    if (event is KeyDownEvent) {
+      if (isDown) _volDownHeld = true;
+      if (isUp) _volUpHeld = true;
+    } else if (event is KeyUpEvent) {
+      if (isDown) _volDownHeld = false;
+      if (isUp) _volUpHeld = false;
+    }
+
+    if (_volDownHeld && _volUpHeld && _locked) {
+      setState(() {
+        _locked = false;
+        _volDownHeld = false;
+        _volUpHeld = false;
+      });
+      return true;
+    }
+    return false;
   }
 
   Future<void> _load() async {
@@ -220,6 +252,10 @@ class _SenderScreenState extends State<SenderScreen> {
   }
 
   void _handleNativeEvent(Map<String, Object?> event) {
+    if (event['volumeCombo'] == true) {
+      if (_locked && mounted) setState(() => _locked = false);
+      return;
+    }
     _dbg('native event: $event');
     final nextLive = event['live'] == true;
     final status = event['status']?.toString();
@@ -502,6 +538,8 @@ class _SenderScreenState extends State<SenderScreen> {
                   live: _live,
                   stats: _stats,
                   version: AppMetadata.version,
+                  locked: _locked,
+                  onLockTap: () => setState(() => _locked = true),
                   onLogTap: () => setState(() => _showDebug = !_showDebug),
                   onVersionTap: () {
                     _versionTaps++;
@@ -631,6 +669,39 @@ class _SenderScreenState extends State<SenderScreen> {
               ),
             ),
           // ──────────────────────────────────────────────────────
+          if (_locked)
+            Positioned.fill(
+              child: AbsorbPointer(
+                child: Container(
+                  color: Colors.black.withValues(alpha: .78),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(
+                        Icons.lock,
+                        size: 72,
+                        color: Colors.white.withValues(alpha: .9),
+                      ),
+                      const SizedBox(height: 16),
+                      const Text(
+                        'LOCKED',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 22,
+                          fontWeight: FontWeight.w900,
+                          letterSpacing: 4,
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      const Text(
+                        'Vol ↓ + Vol ↑  to unlock',
+                        style: TextStyle(color: Colors.white54, fontSize: 13),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
         ],
       ),
     );
@@ -735,6 +806,8 @@ class _TopBar extends StatelessWidget {
     required this.version,
     required this.onVersionTap,
     required this.onLogTap,
+    required this.locked,
+    required this.onLockTap,
   });
 
   final String status;
@@ -743,6 +816,8 @@ class _TopBar extends StatelessWidget {
   final String version;
   final VoidCallback onVersionTap;
   final VoidCallback onLogTap;
+  final bool locked;
+  final VoidCallback onLockTap;
 
   @override
   Widget build(BuildContext context) {
@@ -782,6 +857,23 @@ class _TopBar extends StatelessWidget {
                 ),
                 child: const Text('LOG',
                     style: TextStyle(fontSize: 10, color: Colors.white70)),
+              ),
+              const SizedBox(width: 6),
+              GestureDetector(
+                onTap: onLockTap,
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: Colors.white10,
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Icon(
+                    locked ? Icons.lock : Icons.lock_open_outlined,
+                    size: 14,
+                    color: locked ? Colors.orangeAccent : Colors.white70,
+                  ),
+                ),
               ),
               const SizedBox(width: 12),
               GestureDetector(
