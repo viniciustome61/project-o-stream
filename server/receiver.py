@@ -127,7 +127,8 @@ class SlotState:
         self.thermal:   Optional[str]   = None
         self.rtt_ms:    Optional[float] = None
         self.transport: Optional[str]   = None
-        self.tele_ts:   float           = 0.0
+        self.tele_ts:      float           = 0.0
+        self.ffmpeg_status: str           = "idle"
         self.proc: Optional[subprocess.Popen] = None  # type: ignore[type-arg]
 
     @property
@@ -293,9 +294,22 @@ class Receiver:
                 except Exception:
                     pass
                 if slot.ip != client_ip:
+                    old_ip = slot.ip
                     slot.ip        = client_ip
                     slot.transport = transport
-                    self._log_msg(f"Slot {slot_idx + 1} assigned to {client_ip} (SRT :{slot.srt_port})")
+                    slot.tele_ts   = 0.0  # clear stale telemetry
+                    if old_ip:
+                        # new phone taking over a stale slot — restart FFmpeg cleanly
+                        if slot.proc and slot.proc.poll() is None:
+                            try:
+                                slot.proc.kill()
+                            except Exception:
+                                pass
+                        self._log_msg(
+                            f"Slot {slot_idx + 1}: {old_ip} replaced by {client_ip} (SRT :{slot.srt_port})"
+                        )
+                    else:
+                        self._log_msg(f"Slot {slot_idx + 1} assigned to {client_ip} (SRT :{slot.srt_port})")
 
         sock.close()
 
@@ -374,37 +388,32 @@ class Receiver:
     def _relay_worker_slot(self, slot: SlotState) -> None:
         ndi_note = f" + NDI: Project-O-Camera-{slot.index + 1}" if (self.args.ndi and self.ndi_available) else ""
         self._log_msg(f"Cam {slot.index + 1}: waiting on SRT :{slot.srt_port} -> UDP :{slot.obs_port}{ndi_note}")
-        backoff = 1.0
         while not self.stopping:
             try:
                 t0 = time.time()
+                slot.ffmpeg_status = "listening"
                 slot.proc = self._start_ffmpeg(slot)
                 slot.proc.wait()
                 if self.stopping:
                     break
                 elapsed = time.time() - t0
                 code    = slot.proc.returncode
-                # grab last stderr line for context
                 stderr_tail = ""
                 if slot.proc.stderr:
-                    raw = slot.proc.stderr.read().decode("utf-8", errors="replace").strip()
+                    raw  = slot.proc.stderr.read().decode("utf-8", errors="replace").strip()
                     last = [l.strip() for l in raw.splitlines() if l.strip()]
                     if last:
-                        stderr_tail = f": {last[-1][:120]}"
+                        stderr_tail = f" ({last[-1][:80]})"
                 if elapsed < 3.0:
-                    # fast exit = startup failure; back off to avoid log flood
-                    backoff = min(backoff * 2, 30.0)
-                    self._log_msg(
-                        f"Cam {slot.index + 1}: FFmpeg failed ({code}){stderr_tail} - retry in {backoff:.0f}s"
-                    )
+                    slot.ffmpeg_status = f"err {code}{stderr_tail} - retry 3s"
                 else:
-                    backoff = 1.0
+                    slot.ffmpeg_status = "restarting"
                     self._log_msg(f"Cam {slot.index + 1}: FFmpeg exited ({code}), restarting...")
-                time.sleep(backoff)
+                time.sleep(3)
             except Exception as e:
+                slot.ffmpeg_status = f"error - retry 3s"
                 self._log_msg(f"Cam {slot.index + 1}: relay error: {e}")
-                backoff = min(backoff * 2, 30.0)
-                time.sleep(backoff)
+                time.sleep(3)
 
     def _relay_worker(self) -> None:
         if self.args.direct_to_obs:
@@ -510,7 +519,7 @@ class ReceiverApp(App[None]):
     def on_mount(self) -> None:
         table = self.query_one(DataTable)
         self._col_keys = list(table.add_columns(
-            "●", "CAM", "DEVICE", "NETWORK", "RTT", "BATTERY", "THERMAL", "OBS INPUT"
+            "●", "CAM", "DEVICE", "NETWORK", "RTT", "BATTERY", "THERMAL", "OBS INPUT", "STATUS"
         ))
         for slot in self._receiver.slots:
             table.add_row(*self._slot_cells(slot), key=str(slot.index))
@@ -574,7 +583,17 @@ class ReceiverApp(App[None]):
         if self._receiver.args.ndi and self._receiver.ndi_available:
             obs.append(f"  NDI: Project-O-Camera-{s.index + 1}", style="cyan dim")
 
-        return (dot, str(s.index + 1), dev, net, rtt, batt, thermal, obs)
+        st = s.ffmpeg_status
+        if st == "listening":
+            status = Text(st, style="dim")
+        elif st in ("restarting", "idle"):
+            status = Text(st, style="yellow")
+        elif st.startswith("err"):
+            status = Text(st, style="red")
+        else:
+            status = Text(st, style="dim")
+
+        return (dot, str(s.index + 1), dev, net, rtt, batt, thermal, obs, status)
 
     # ------------------------------------------------------------------ refresh
 
