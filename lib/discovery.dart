@@ -121,7 +121,8 @@ class ReceiverDiscovery {
       final payload = utf8.encode(probe);
       // LAN broadcast — finds the server when Tailscale is off or no cached host.
       try {
-        probeSocket.send(payload, InternetAddress.broadcast, discoveryPort);
+        probeSocket.send(
+            payload, InternetAddress('255.255.255.255'), discoveryPort);
       } on Object {/* broadcast unsupported on this interface — ignore */}
       for (final address in _candidateAddresses(cachedHost)) {
         try {
