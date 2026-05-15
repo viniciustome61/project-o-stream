@@ -131,7 +131,7 @@ def gh(
     with urllib.request.urlopen(req) as resp:
         status = resp.getcode()
         if ok and status not in ok:
-            raise RuntimeError(f"GitHub {method} {url} → HTTP {status}")
+            raise RuntimeError(f"GitHub {method} {url} -> HTTP {status}")
         data = resp.read()
         return data if raw else (json.loads(data.decode()) if data else None)
 
@@ -150,7 +150,7 @@ def wait_for_push_run(
             assert isinstance(runs, dict)
             for run in runs.get("workflow_runs", []):
                 if run.get("head_sha") == head_sha:
-                    print(f" → run {run['id']}")
+                    print(f" -> run {run['id']}")
                     return int(run["id"])
         except Exception as exc:
             print(f"\n[ship] poll error: {exc}", flush=True)
@@ -171,7 +171,7 @@ def wait_for_success(
         assert isinstance(run, dict)
         if run.get("status") == "completed":
             conclusion = run.get("conclusion", "?")
-            print(f" → {conclusion}")
+            print(f" -> {conclusion}")
             if conclusion == "success":
                 return
             raise RuntimeError(f"Build {run_id} ended with: {conclusion}")
@@ -372,7 +372,7 @@ def app_name() -> str:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="AI commit messages → push → wait for CI → download IPA."
+        description="AI commit messages -> push -> CI wait -> IPA download."
     )
     p.add_argument("--token", default=None,
                    help="GitHub token (overrides .env.ship and env vars).")
