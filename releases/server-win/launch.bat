@@ -1,13 +1,29 @@
 @echo off
 title Project O Stream - Receiver
+cd /d "%~dp0"
 
-:: Re-launch as administrator if not already elevated
-net session >nul 2>&1
+:: ---- Python ----------------------------------------------------------------
+python --version >nul 2>&1
 if %errorlevel% neq 0 (
-    powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -Command ^
-        "$argsStr='%*'; if($argsStr){ Start-Process -FilePath '%~f0' -ArgumentList $argsStr -Verb RunAs } else { Start-Process -FilePath '%~f0' -Verb RunAs }"
-    exit /b
+    echo [ERROR] Python not found. Install Python 3.10+ from python.org and add it to PATH.
+    pause & exit /b 1
 )
 
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0start-receiver.ps1" -DirectToObs %*
-if %errorlevel% neq 0 pause
+:: ---- textual ---------------------------------------------------------------
+python -c "import textual" >nul 2>&1
+if %errorlevel% neq 0 (
+    echo Installing textual, please wait...
+    python -m pip install textual
+    if %errorlevel% neq 0 (
+        echo [ERROR] pip install textual failed. Run manually: pip install textual
+        pause & exit /b 1
+    )
+)
+
+:: ---- launch ----------------------------------------------------------------
+python receiver.py %*
+if %errorlevel% neq 0 (
+    echo.
+    echo [ERROR] receiver.py exited with code %errorlevel%
+    pause
+)
