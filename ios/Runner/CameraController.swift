@@ -128,7 +128,7 @@ final class CameraController: NSObject {
         }
         await mixer.addOutput(stream)
 
-        let urlString = "srt://\(host):\(port)?mode=caller&transtype=live&latency=\(latency)&tlpktdrop=1&pkt_size=1316"
+        let urlString = "srt://\(host):\(port)?mode=caller&latency=\(latency)&tlpktdrop=1"
         guard let url = URL(string: urlString) else {
             throw StreamError.invalidArguments
         }

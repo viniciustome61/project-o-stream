@@ -78,7 +78,7 @@ if ($Health) {
         discoveryEnabled = -not $NoDiscovery
         directToObs      = [bool]$DirectToObs
         obsInput         = if ($DirectToObs) {
-            "srt://0.0.0.0:$($SrtPort)?mode=listener&latency=$($latencyVal)&pkt_size=1316"
+            "srt://0.0.0.0:$($SrtPort)?mode=listener&latency=$($latencyVal)"
         } else {
             "udp://127.0.0.1:$ObsUdpPort"
         }
@@ -182,7 +182,7 @@ if ($DirectToObs) {
 }
 
 # --- Legacy relay mode (ffmpeg → UDP → OBS) ---
-$inputUrl = "srt://0.0.0.0:$($SrtPort)?mode=listener&transtype=live&latency=$latencyVal&rcvlatency=$latencyVal&peerlatency=$latencyVal&tlpktdrop=1&pkt_size=1316"
+$inputUrl = "srt://0.0.0.0:$($SrtPort)?mode=listener&latency=$latencyVal"
 $target = "udp://127.0.0.1:$($ObsUdpPort)?pkt_size=1316"
 
 $ffmpegArgs = @(
