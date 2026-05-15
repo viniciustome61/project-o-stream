@@ -23,6 +23,7 @@ class AppDelegate: FlutterAppDelegate, FlutterStreamHandler {
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
     ) -> Bool {
         GeneratedPluginRegistrant.register(with: self)
+        UIDevice.current.isBatteryMonitoringEnabled = true
         registerNativePreviewFactory()
 
         let launched = super.application(application, didFinishLaunchingWithOptions: launchOptions)
@@ -275,6 +276,20 @@ class AppDelegate: FlutterAppDelegate, FlutterStreamHandler {
                     UIApplication.shared.isIdleTimerDisabled = enabled
                     send(status: enabled ? "Screen awake lock on" : "Screen awake lock off", live: camera?.isStreaming == true)
                     result(nil)
+                case "getDeviceTelemetry":
+                    let level = UIDevice.current.batteryLevel
+                    let state = UIDevice.current.batteryState
+                    let thermal = ProcessInfo.processInfo.thermalState
+                    let thermalNames: [ProcessInfo.ThermalState: String] = [
+                        .nominal: "nominal", .fair: "fair",
+                        .serious: "serious", .critical: "critical",
+                    ]
+                    result([
+                        "battery": Double(level),
+                        "charging": state == .charging || state == .full,
+                        "thermalState": thermalNames[thermal] ?? "nominal",
+                        "hostname": UIDevice.current.name,
+                    ] as [String: Any])
                 default:
                     result(FlutterMethodNotImplemented)
                 }
