@@ -410,6 +410,38 @@ class _SenderScreenState extends State<SenderScreen> {
     }
   }
 
+  Future<void> _restartStream() async {
+    if (!_live || _busy) return;
+    setState(() {
+      _busy = true;
+      _live = false;
+      _status = 'Applying...';
+    });
+    try {
+      await NativeStreamer.stopStream();
+      await NativeStreamer.initialize();
+      await NativeStreamer.startStream(_config);
+      if (!mounted) return;
+      setState(() {
+        _live = true;
+        _status = 'Live';
+      });
+    } catch (error) {
+      if (!mounted) return;
+      String msg = error.toString();
+      if (error is PlatformException) {
+        msg = error.message ?? error.code;
+      }
+      setState(() => _status = 'Stream error: $msg');
+      if (_config.autoReconnect) {
+        _increaseAutoReconnectDelay();
+        _scheduleAutoConnect();
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
   Future<void> _setZoom(double value) async {
     setState(() => _zoom = value);
     try {
@@ -493,21 +525,27 @@ class _SenderScreenState extends State<SenderScreen> {
                     await _discover();
                     await _ensureLive();
                   },
-                  onProfileChanged: (profile) => setState(() {
-                    _config = _config.copyWith(
+                  onProfileChanged: (profile) {
+                    setState(() => _config = _config.copyWith(
                         profile: profile,
-                        latencyMs: profile.recommendedLatencyMs);
-                  }),
-                  onCodecChanged: (value) => setState(() {
-                    _config = _config.copyWith(useHevc: value);
-                  }),
-                  onMicrophoneChanged: (value) => setState(() {
-                    _config = _config.copyWith(microphone: value);
-                  }),
+                        latencyMs: profile.recommendedLatencyMs));
+                    if (_live) unawaited(_restartStream());
+                  },
+                  onCodecChanged: (value) {
+                    setState(() => _config = _config.copyWith(useHevc: value));
+                    if (_live) unawaited(_restartStream());
+                  },
+                  onMicrophoneChanged: (value) {
+                    setState(
+                        () => _config = _config.copyWith(microphone: value));
+                    if (_live) unawaited(_restartStream());
+                  },
                   onLensChanged: (lens) => unawaited(_setLens(lens)),
-                  onLatencyChanged: (value) => setState(() {
-                    _config = _config.copyWith(latencyMs: value.round());
-                  }),
+                  onLatencyChanged: (value) {
+                    setState(() =>
+                        _config = _config.copyWith(latencyMs: value.round()));
+                    if (_live) unawaited(_restartStream());
+                  },
                   onAutoReconnectChanged: _setAutoReconnect,
                   onKeepScreenOnChanged: (value) async {
                     await NativeStreamer.setKeepScreenOn(value);

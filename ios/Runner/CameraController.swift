@@ -113,6 +113,7 @@ final class CameraController: NSObject {
         let width = profile?["width"] as? Int ?? 3840
         let height = profile?["height"] as? Int ?? 2160
         let bitrate = profile?["bitrate"] as? Int ?? 12_000_000
+        let useHevc = config["useHevc"] as? Bool ?? false
         let latency = latencyMs
 
         let shouldRestorePreview = previewRunning || captureSession.isRunning
@@ -128,10 +129,13 @@ final class CameraController: NSObject {
         self.mixer = mixer
 
         do {
+            let profileLevel = useHevc
+                ? (kVTProfileLevel_HEVC_Main_AutoLevel as String)
+                : (kVTProfileLevel_H264_High_AutoLevel as String)
             try await stream.setVideoSettings(VideoCodecSettings(
                 videoSize: CGSize(width: CGFloat(width), height: CGFloat(height)),
                 bitRate: bitrate,
-                profileLevel: kVTProfileLevel_H264_High_AutoLevel as String
+                profileLevel: profileLevel
             ))
 
             try await mixer.attachVideo(currentVideoDevice(), track: 0)
