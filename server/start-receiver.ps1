@@ -2,6 +2,7 @@ param(
     [int]$SrtPort = 7070,
     [int]$ObsUdpPort = 15000,
     [int]$LatencyMs = 80,
+    [int]$Cameras = 1,
     [switch]$Health,
     [switch]$NoDiscovery,
     [switch]$DirectToObs
@@ -44,148 +45,56 @@ if (Get-Command tailscale -ErrorAction SilentlyContinue) {
         if ($LASTEXITCODE -eq 0) {
             $tailscaleIp = ($tailscaleOutput | Select-Object -First 1)
         }
-    } catch {
-        $tailscaleIp = $null
+    } catch { $tailscaleIp = $null }
+}
+
+# Build slot table: each camera gets its own SRT port and OBS UDP port (step of 3).
+$slots = @()
+for ($i = 0; $i -lt $Cameras; $i++) {
+    $slots += [pscustomobject]@{
+        index      = $i
+        srtPort    = $SrtPort + $i * 3
+        obsUdpPort = $ObsUdpPort + $i * 3
     }
 }
 
-# Ensure Windows Firewall allows inbound traffic on the SRT port.
-$fwRuleName = "Project-O-Stream SRT $SrtPort"
-$fwExists = Get-NetFirewallRule -DisplayName $fwRuleName -ErrorAction SilentlyContinue
-if (-not $fwExists) {
-    try {
-        New-NetFirewallRule -DisplayName $fwRuleName -Direction Inbound `
-            -Protocol UDP -LocalPort $SrtPort -Action Allow -ErrorAction Stop | Out-Null
-        New-NetFirewallRule -DisplayName "$fwRuleName TCP" -Direction Inbound `
-            -Protocol TCP -LocalPort $SrtPort -Action Allow -ErrorAction Stop | Out-Null
-        Write-Host "[Receiver] Firewall: opened port $SrtPort UDP+TCP for SRT."
-    } catch {
-        Write-Host "[Receiver] Firewall: could not add rule (run as Administrator to open port $SrtPort): $($_.Exception.Message)"
+# Ensure Windows Firewall allows inbound traffic on every SRT port.
+foreach ($slot in $slots) {
+    $fwRuleName = "Project-O-Stream SRT $($slot.srtPort)"
+    if (-not (Get-NetFirewallRule -DisplayName $fwRuleName -ErrorAction SilentlyContinue)) {
+        try {
+            New-NetFirewallRule -DisplayName $fwRuleName -Direction Inbound `
+                -Protocol UDP -LocalPort $slot.srtPort -Action Allow -ErrorAction Stop | Out-Null
+            New-NetFirewallRule -DisplayName "$fwRuleName TCP" -Direction Inbound `
+                -Protocol TCP -LocalPort $slot.srtPort -Action Allow -ErrorAction Stop | Out-Null
+            Write-Host "[Receiver] Firewall: opened port $($slot.srtPort) UDP+TCP."
+        } catch {
+            Write-Host "[Receiver] Firewall: could not open $($slot.srtPort): $($_.Exception.Message)"
+        }
     }
 }
 
-$latencyVal = $LatencyMs
+$latencyUs = $LatencyMs * 1000
+$slotsJson  = ($slots | Select-Object index, srtPort, obsUdpPort | ConvertTo-Json -Compress)
 
 if ($Health) {
     [pscustomobject]@{
         service          = "project-o-stream-receiver"
-        version          = "3.0"
+        version          = "4.0"
         tailscaleIp      = $tailscaleIp
-        srtPort          = $SrtPort
-        obsUdpPort       = $ObsUdpPort
+        cameras          = $Cameras
+        slots            = $slots
         latencyMs        = $LatencyMs
         ffmpeg           = if ($DirectToObs) { $null } else { $ffmpegPath }
         discoveryEnabled = -not $NoDiscovery
         directToObs      = [bool]$DirectToObs
-        obsInput         = if ($DirectToObs) {
-            "srt://0.0.0.0:$($SrtPort)?mode=listener&latency=$($latencyVal)&pkt_size=1316"
-        } else {
-            "udp://127.0.0.1:$ObsUdpPort"
-        }
     } | ConvertTo-Json -Depth 4
     return
 }
 
-$discoveryJob = $null
-$discoveryScript = Join-Path $scriptRoot "discovery-server.ps1"
+$discoveryJob         = $null
+$discoveryScript      = Join-Path $scriptRoot "discovery-server.ps1"
 $lastDiscoveryRestart = (Get-Date).AddSeconds(-10)
-$discoveryDisabledForRun = $false
-$discoveryPort = 7071
-$clientDiscoveryPort = 7072
-
-function Test-UdpPortBindable {
-    param([int]$Port)
-
-    $client = $null
-    try {
-        $client = [System.Net.Sockets.UdpClient]::new()
-        $client.ExclusiveAddressUse = $false
-        $client.Client.SetSocketOption(
-            [System.Net.Sockets.SocketOptionLevel]::Socket,
-            [System.Net.Sockets.SocketOptionName]::ReuseAddress,
-            $true
-        )
-        $client.Client.Bind([System.Net.IPEndPoint]::new([System.Net.IPAddress]::Any, $Port))
-        return $true
-    } catch {
-        return $false
-    } finally {
-        if ($client) {
-            $client.Close()
-        }
-    }
-}
-
-function Get-UdpPortOwners {
-    param([int]$Port)
-
-    $ownerPids = @()
-    try {
-        $ownerPids = Get-NetUDPEndpoint -LocalPort $Port -ErrorAction Stop |
-            Select-Object -ExpandProperty OwningProcess -Unique
-    } catch {
-        $ownerPids = @()
-    }
-
-    foreach ($ownerPid in $ownerPids) {
-        if (-not $ownerPid) { continue }
-        $process = Get-Process -Id $ownerPid -ErrorAction SilentlyContinue
-        [pscustomobject]@{
-            Pid  = [int]$ownerPid
-            Name = if ($process) { $process.ProcessName } else { "Unknown" }
-            Path = if ($process -and $process.Path) { $process.Path } else { "" }
-        }
-    }
-}
-
-function Ensure-DiscoveryPortAvailable {
-    param([int]$Port)
-
-    if (Test-UdpPortBindable -Port $Port) {
-        return $true
-    }
-
-    Write-Host "[Receiver] UDP $Port is blocked. Discovery cannot start while this port is unavailable."
-    $owners = @(Get-UdpPortOwners -Port $Port)
-
-    if ($owners.Count -eq 0) {
-        Write-Host "[Receiver] Windows did not report a process owner for UDP $Port."
-        Write-Host "[Receiver] This can be a reserved/excluded Windows port. Check with:"
-        Write-Host "           netsh int ipv4 show excludedportrange protocol=udp"
-        return $false
-    }
-
-    foreach ($owner in $owners) {
-        $detail = if ($owner.Path) { " ($($owner.Path))" } else { "" }
-        Write-Host "[Receiver] UDP $Port is owned by $($owner.Name) PID $($owner.Pid)$detail"
-
-        if ($owner.Pid -le 4 -or $owner.Pid -eq $PID) {
-            Write-Host "[Receiver] Not safe to kill PID $($owner.Pid). Close that service manually."
-            continue
-        }
-
-        $answer = Read-Host "[Receiver] Kill $($owner.Name) PID $($owner.Pid) so discovery can use UDP $Port? [y/N]"
-        if ($answer -match '^(y|yes|s|sim)$') {
-            try {
-                Stop-Process -Id $owner.Pid -Force -ErrorAction Stop
-                Write-Host "[Receiver] Killed $($owner.Name) PID $($owner.Pid)."
-            } catch {
-                Write-Host "[Receiver] Could not kill PID $($owner.Pid): $($_.Exception.Message)"
-            }
-        } else {
-            Write-Host "[Receiver] Keeping $($owner.Name) PID $($owner.Pid). Discovery disabled for this run."
-            return $false
-        }
-    }
-
-    Start-Sleep -Milliseconds 500
-    if (Test-UdpPortBindable -Port $Port) {
-        return $true
-    }
-
-    Write-Host "[Receiver] UDP $Port is still blocked after cleanup. Discovery disabled for this run."
-    return $false
-}
 
 function Write-DiscoveryJobOutput {
     param($Job)
@@ -198,20 +107,13 @@ function Write-DiscoveryJobOutput {
 
 function Start-DiscoveryJob {
     if ($NoDiscovery) { return }
-    if ($script:discoveryDisabledForRun) { return }
     if (-not (Test-Path -LiteralPath $discoveryScript)) {
         Write-Host "[Receiver] Discovery script not found: $discoveryScript"
         return
     }
-
-    if (-not (Ensure-DiscoveryPortAvailable -Port $script:discoveryPort)) {
-        $script:discoveryDisabledForRun = $true
-        $script:lastDiscoveryRestart = Get-Date
-        return
-    }
-
     try {
-        $script:discoveryJob = Start-Job -FilePath $discoveryScript -ArgumentList $script:discoveryPort, $SrtPort, $ObsUdpPort, $script:clientDiscoveryPort
+        $script:discoveryJob = Start-Job -FilePath $discoveryScript `
+            -ArgumentList 7071, $slotsJson, 7072
         $script:lastDiscoveryRestart = Get-Date
     } catch {
         Write-Host "[Receiver] Discovery server failed to start: $($_.Exception.Message)"
@@ -221,65 +123,49 @@ function Start-DiscoveryJob {
 
 function Ensure-DiscoveryRunning {
     if ($NoDiscovery) { return }
-    if ($script:discoveryDisabledForRun) { return }
     if ($script:discoveryJob -and $script:discoveryJob.State -eq 'Running') {
         Write-DiscoveryJobOutput $script:discoveryJob
         return
     }
-
     if ($script:discoveryJob) {
         Write-DiscoveryJobOutput $script:discoveryJob
-        Write-Host "[Receiver] Discovery server stopped ($($script:discoveryJob.State)); restarting discovery only."
+        Write-Host "[Receiver] Discovery stopped ($($script:discoveryJob.State)); restarting."
         Remove-Job $script:discoveryJob -Force -ErrorAction SilentlyContinue
         $script:discoveryJob = $null
     }
-
-    if (((Get-Date) - $script:lastDiscoveryRestart).TotalSeconds -lt 2) {
-        return
-    }
-
+    if (((Get-Date) - $script:lastDiscoveryRestart).TotalSeconds -lt 2) { return }
     Start-DiscoveryJob
 }
 
 Start-DiscoveryJob
 
+$camWord = if ($Cameras -gt 1) { "$Cameras cameras" } else { "1 camera" }
 Write-Host ""
 Write-Host "========================================"
-Write-Host " Stream Receiver"
-Write-Host " SRT listen : srt://0.0.0.0:$SrtPort"
-if ($tailscaleIp) {
-    Write-Host " Advertise  : srt://$($tailscaleIp):$SrtPort"
-}
-Write-Host " Latency    : $LatencyMs ms"
-if ($DirectToObs) {
+Write-Host " Stream Receiver  ($camWord)"
+Write-Host " Latency   : $LatencyMs ms"
+if ($tailscaleIp) { Write-Host " Tailscale : $tailscaleIp" }
+foreach ($slot in $slots) {
+    $label = if ($Cameras -gt 1) { " [Cam $($slot.index + 1)]" } else { "" }
     Write-Host ""
-    Write-Host " >> OBS Media Source URL (paste as-is):"
-    Write-Host "    srt://0.0.0.0:$($SrtPort)?mode=listener&latency=$($latencyVal)&pkt_size=1316"
-    Write-Host ""
-    Write-Host " >> OBS Media Source settings:"
-    Write-Host "    [x] Restart playback when source becomes inactive"
-} else {
-    Write-Host " Output     : udp://127.0.0.1:$($ObsUdpPort)?pkt_size=1316"
-    Write-Host " OBS Input  : udp://127.0.0.1:$ObsUdpPort"
+    Write-Host " SRT$label      : srt://0.0.0.0:$($slot.srtPort)"
+    if ($DirectToObs) {
+        Write-Host " OBS URL$label  : srt://0.0.0.0:$($slot.srtPort)?mode=listener&latency=$($latencyUs)&pkt_size=1316"
+        Write-Host "                  [x] Restart playback when source becomes inactive"
+    } else {
+        Write-Host " OBS Input$label: udp://127.0.0.1:$($slot.obsUdpPort)"
+    }
 }
-if ($script:discoveryDisabledForRun) {
-    Write-Host " Discovery  : disabled (UDP $discoveryPort blocked)"
-} elseif (-not $NoDiscovery) {
-    Write-Host " Discovery  : UDP $discoveryPort probes, UDP $clientDiscoveryPort offers"
+if (-not $NoDiscovery) {
+    Write-Host ""
+    Write-Host " Discovery : UDP 7071 probes, UDP 7072 offers"
 }
 Write-Host "========================================"
 Write-Host ""
 
 if ($DirectToObs) {
-    Write-Host "[Receiver] Direct-to-OBS mode. Phone connects directly to OBS via SRT."
-    Write-Host "[Receiver] OBS owns the SRT listener here, so this console will not show connection frames."
-    Write-Host "[Receiver] Watch the OBS Media Source output/status for the live connection."
-    Write-Host "[Receiver] For console connection logs, run start-receiver.ps1 without -DirectToObs and use OBS input udp://127.0.0.1:$ObsUdpPort."
-    if ($script:discoveryDisabledForRun) {
-        Write-Host "[Receiver] Discovery disabled for this run. Restart after freeing UDP $discoveryPort."
-    } else {
-        Write-Host "[Receiver] Discovery running. Press Ctrl+C to stop."
-    }
+    Write-Host "[Receiver] Direct-to-OBS mode. Phones connect directly to OBS via SRT."
+    Write-Host "[Receiver] Discovery running. Press Ctrl+C to stop."
     try {
         while ($true) {
             Start-Sleep -Milliseconds 500
@@ -295,39 +181,44 @@ if ($DirectToObs) {
     return
 }
 
-# --- Legacy relay mode (ffmpeg → UDP → OBS) ---
-$inputUrl = "srt://0.0.0.0:$($SrtPort)?mode=listener&transtype=live&latency=$latencyVal&rcvlatency=$latencyVal&peerlatency=$latencyVal&tlpktdrop=1&pkt_size=1316"
-$target = "udp://127.0.0.1:$($ObsUdpPort)?pkt_size=1316"
+# --- Relay mode: one ffmpeg process per camera slot ---
+function Start-SlotRelay {
+    param([int]$SlotIndex)
+    $slot = $slots[$SlotIndex]
+    $inputUrl = "srt://0.0.0.0:$($slot.srtPort)?mode=listener&transtype=live&latency=$latencyUs&rcvlatency=$latencyUs&peerlatency=$latencyUs&tlpktdrop=1&pkt_size=1316"
+    $target   = "udp://127.0.0.1:$($slot.obsUdpPort)?pkt_size=1316"
+    $ffmpegArgs = @(
+        '-hide_banner', '-loglevel', 'info',
+        '-fflags', 'nobuffer', '-flags', 'low_delay',
+        '-probesize', '32k', '-analyzeduration', '0',
+        '-i', $inputUrl,
+        '-map', '0', '-c', 'copy', '-f', 'mpegts', $target
+    )
+    Write-Host "[Receiver] Cam $($slot.index + 1) waiting on SRT $($slot.srtPort) -> UDP $($slot.obsUdpPort)"
+    return Start-Process -FilePath $ffmpegPath -ArgumentList $ffmpegArgs -PassThru -NoNewWindow
+}
 
-$ffmpegArgs = @(
-    '-hide_banner', '-loglevel', 'info',
-    '-fflags', 'nobuffer', '-flags', 'low_delay',
-    '-probesize', '32k', '-analyzeduration', '0',
-    '-i', $inputUrl,
-    '-map', '0', '-c', 'copy', '-f', 'mpegts', $target
-)
-
-$proc = $null
+$procs = [object[]]::new($slots.Count)
 try {
+    for ($i = 0; $i -lt $slots.Count; $i++) {
+        $procs[$i] = Start-SlotRelay -SlotIndex $i
+    }
     while ($true) {
         Ensure-DiscoveryRunning
-
-        Write-Host "[Receiver] Waiting for SRT caller on UDP $SrtPort..."
-        $proc = Start-Process -FilePath $ffmpegPath -ArgumentList $ffmpegArgs -PassThru -NoNewWindow
-
-        while (-not $proc.HasExited) {
-            Start-Sleep -Milliseconds 400
-            Ensure-DiscoveryRunning
+        for ($i = 0; $i -lt $procs.Count; $i++) {
+            if ($procs[$i] -and $procs[$i].HasExited) {
+                $code = $procs[$i].ExitCode
+                Write-Host "[Receiver] Cam $($i + 1) exited ($code); restarting in 1s..."
+                Start-Sleep -Seconds 1
+                $procs[$i] = Start-SlotRelay -SlotIndex $i
+            }
         }
-
-        $exitCode = $proc.ExitCode
-        $proc = $null
-        Write-Host "[Receiver] ffmpeg exited with code $exitCode. Restarting listener in 1s..."
-        Start-Sleep -Seconds 1
+        Start-Sleep -Milliseconds 400
     }
-    if ($proc -and -not $proc.HasExited) { $proc.WaitForExit(3000) | Out-Null }
 } finally {
-    if ($proc -and -not $proc.HasExited) { $proc.Kill(); $proc.WaitForExit(2000) | Out-Null }
+    foreach ($proc in $procs) {
+        if ($proc -and -not $proc.HasExited) { $proc.Kill(); $proc.WaitForExit(2000) | Out-Null }
+    }
     if ($discoveryJob) {
         Write-DiscoveryJobOutput $discoveryJob
         Stop-Job $discoveryJob -ErrorAction SilentlyContinue

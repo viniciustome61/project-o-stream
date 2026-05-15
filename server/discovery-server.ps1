@@ -1,162 +1,212 @@
 param(
     [int]$DiscoveryPort = 7071,
-    [int]$SrtPort = 7070,
-    [int]$ObsUdpPort = 15000,
+    [string]$SlotsJson = '[{"index":0,"srtPort":7070,"obsUdpPort":15000}]',
     [int]$ClientDiscoveryPort = 7072
 )
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"
 
-Write-Host "[Discovery] Initializing..."
+$slots            = $SlotsJson | ConvertFrom-Json
+$slotAssignments  = @{}   # key: phoneIp, value: @{slotIndex; assignedAt}
+$slotTtlSeconds   = 120
 
+$tailscale   = Get-Command tailscale -ErrorAction SilentlyContinue
 $tailscaleIp = $null
-if (Get-Command tailscale -ErrorAction SilentlyContinue) {
+if ($tailscale) {
     try {
         $out = & tailscale ip -4 2>$null
-        if ($LASTEXITCODE -eq 0) { $script:tailscaleIp = ($out | Select-Object -First 1) }
-    } catch { }
+        if ($LASTEXITCODE -eq 0) { $tailscaleIp = ($out | Select-Object -First 1) }
+    } catch { $tailscaleIp = $null }
 }
 
 $lanIp = $null
 try {
-    $script:lanIp = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-        Where-Object { $_.IPAddress -notmatch '^(127\.|169\.254\.|100\.)' -and $_.PrefixOrigin -in @('Dhcp', 'Manual') } |
-        Sort-Object PrefixLength -Descending | Select-Object -First 1).IPAddress
+    $lanIp = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.IPAddress -notmatch '^(127\.|169\.254\.|100\.)' -and
+            $_.PrefixOrigin -in @('Dhcp', 'Manual')
+        } | Sort-Object PrefixLength -Descending | Select-Object -First 1).IPAddress
 } catch { }
 
-function New-SharedUdpListener {
-    param([int]$Port)
+$udp = [System.Net.Sockets.UdpClient]::new($DiscoveryPort)
+$udp.EnableBroadcast = $true
+$udp.Client.ReceiveTimeout = 300
+$pulseUdp  = [System.Net.Sockets.UdpClient]::new()
+$endpoint  = [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Any, 0)
+$hostname  = [System.Net.Dns]::GetHostName()
 
-    $client = [System.Net.Sockets.UdpClient]::new()
-    $client.ExclusiveAddressUse = $false
-    $client.Client.SetSocketOption(
+$conflictUdp      = $null
+$conflictEndpoint = [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Any, 0)
+try {
+    $conflictUdp = [System.Net.Sockets.UdpClient]::new()
+    $conflictUdp.ExclusiveAddressUse = $false
+    $conflictUdp.Client.SetSocketOption(
         [System.Net.Sockets.SocketOptionLevel]::Socket,
-        [System.Net.Sockets.SocketOptionName]::ReuseAddress,
-        $true
-    )
-    $client.Client.Bind([System.Net.IPEndPoint]::new([System.Net.IPAddress]::Any, $Port))
-    $client.EnableBroadcast = $true
-    $client.Client.ReceiveTimeout = 300
-    return $client
-}
+        [System.Net.Sockets.SocketOptionName]::ReuseAddress, $true)
+    $conflictUdp.Client.Bind(
+        [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Any, $ClientDiscoveryPort))
+    $conflictUdp.Client.ReceiveTimeout = 50
+} catch { $conflictUdp = $null }
 
-try {
-    $udp = New-SharedUdpListener -Port $DiscoveryPort
-} catch {
-    Write-Host "[Discovery] Failed to listen on UDP $($DiscoveryPort): $($_.Exception.Message)"
-    Write-Host "[Discovery] Close any old receiver window using UDP $($DiscoveryPort), then run launch.bat again."
-    exit 11
-}
+# Returns the slot assigned to $PhoneIp, assigning a free one if needed.
+function Get-SlotForPhone {
+    param([string]$PhoneIp)
+    $now = Get-Date
 
-$pulseUdp = $null
-try {
-    $pulseUdp = [System.Net.Sockets.UdpClient]::new()
-    $pulseUdp.EnableBroadcast = $true
-} catch {
-    Write-Host "[Discovery] Tailscale peer offers disabled: $($_.Exception.Message)"
-}
+    # Expire stale assignments
+    $toRemove = @($script:slotAssignments.Keys | Where-Object {
+        ($now - $script:slotAssignments[$_].assignedAt).TotalSeconds -gt $script:slotTtlSeconds
+    })
+    foreach ($k in $toRemove) { $script:slotAssignments.Remove($k) }
 
-$hostname = [System.Net.Dns]::GetHostName()
+    # Renew existing assignment for this phone
+    if ($script:slotAssignments.ContainsKey($PhoneIp)) {
+        $script:slotAssignments[$PhoneIp] = @{
+            slotIndex  = $script:slotAssignments[$PhoneIp].slotIndex
+            assignedAt = $now
+        }
+        return $script:slots[$script:slotAssignments[$PhoneIp].slotIndex]
+    }
+
+    # Find first free slot
+    $usedIndices = @($script:slotAssignments.Values | ForEach-Object { $_.slotIndex })
+    $freeIndex   = 0..($script:slots.Count - 1) |
+                   Where-Object { $usedIndices -notcontains $_ } |
+                   Select-Object -First 1
+
+    # All slots taken — evict least-recently-used
+    if ($null -eq $freeIndex) {
+        $lru = ($script:slotAssignments.GetEnumerator() |
+                Sort-Object { $_.Value.assignedAt })[0]
+        $freeIndex = $lru.Value.slotIndex
+        $script:slotAssignments.Remove($lru.Key)
+    }
+
+    $script:slotAssignments[$PhoneIp] = @{ slotIndex = [int]$freeIndex; assignedAt = $now }
+    return $script:slots[[int]$freeIndex]
+}
 
 function New-DiscoveryPayload {
     param([string]$ProbeSourceIp)
-    try {
-        $adv = if ($script:tailscaleIp -and $ProbeSourceIp -and $ProbeSourceIp -match '^100\.') { $script:tailscaleIp }
-               elseif ($script:lanIp) { $script:lanIp }
-               elseif ($script:tailscaleIp) { $script:tailscaleIp }
-               else { $ProbeSourceIp }
-        if (-not $adv) { $adv = "0.0.0.0" }
-        
-        $payload = @{
-            service = "project-o-stream"
-            version = 1
-            host = $adv
-            hostname = $hostname
-            srtPort = $SrtPort
-            discoveryPort = $DiscoveryPort
-            clientDiscoveryPort = $ClientDiscoveryPort
-            obsUdpPort = $ObsUdpPort
-            transport = "srt"
-            capabilities = @{ duplicateReceiverDetection = $false; tailscalePreferred = [bool]$script:tailscaleIp; obsUdpForward = $true; protocolVersion = "3.0" }
-        }
-        return ($payload | ConvertTo-Json -Compress)
-    } catch {
-        Write-Host "[Discovery] Error in New-DiscoveryPayload: $($_.Exception.Message)"
-        return "{}"
+    $slot = Get-SlotForPhone -PhoneIp $ProbeSourceIp
+
+    # Tailscale peers get Tailscale IP; LAN phones get LAN IP.
+    $advertiseHost = if ($tailscaleIp -and $ProbeSourceIp -match '^100\.') {
+        $tailscaleIp
+    } elseif ($lanIp) {
+        $lanIp
+    } elseif ($tailscaleIp) {
+        $tailscaleIp
+    } else {
+        $ProbeSourceIp
+    }
+
+    @{
+        service             = "project-o-stream"
+        version             = 1
+        host                = $advertiseHost
+        lanIp               = $lanIp        # always included; client probes for LAN preference
+        tailscaleIp         = $tailscaleIp  # always included
+        hostname            = $hostname
+        srtPort             = [int]$slot.srtPort
+        obsUdpPort          = [int]$slot.obsUdpPort
+        slotIndex           = [int]$slot.index
+        totalSlots          = $script:slots.Count
+        discoveryPort       = $DiscoveryPort
+        clientDiscoveryPort = $ClientDiscoveryPort
+        transport           = "srt"
+    } | ConvertTo-Json -Compress
+}
+
+function Get-TailscalePeerIps {
+    if (-not $tailscale) { return @() }
+    try { $status = & tailscale status --json 2>$null | ConvertFrom-Json } catch { return @() }
+    $peers = @()
+    if ($status.Peer) { $peers = $status.Peer.PSObject.Properties.Value }
+    $peers |
+        Where-Object { $_.Online -eq $true -and $_.TailscaleIPs } |
+        ForEach-Object { $_.TailscaleIPs | Where-Object { $_ -match '^100\.' -and $_ -ne $tailscaleIp } } |
+        Select-Object -Unique
+}
+
+function Send-OffersToPeers {
+    # Each Tailscale peer gets a slot-specific offer so every phone gets its own slot.
+    foreach ($peerIp in (Get-TailscalePeerIps)) {
+        $payload = [System.Text.Encoding]::UTF8.GetBytes((New-DiscoveryPayload -ProbeSourceIp $peerIp))
+        try { [void]$pulseUdp.Send($payload, $payload.Length, $peerIp, $ClientDiscoveryPort) }
+        catch { continue }
     }
 }
 
-function Get-TailscalePeers {
-    if (-not $script:tailscaleIp) { return @() }
-    try {
-        $statusStr = & tailscale status --json 2>$null
-        if (-not $statusStr) { return @() }
-        $s = $statusStr | ConvertFrom-Json
-        if ($s -and $s.Peer) {
-            $peersObj = $s.Peer
-            # In PowerShell, accessing properties of a dynamic object from JSON can be tricky
-            return $peersObj.PSObject.Properties | 
-                Where-Object { $_.Value -and $_.Value.Online -and $_.Value.TailscaleIPs } | 
-                ForEach-Object { $_.Value.TailscaleIPs | Where-Object { $_ -match '^100\.' } }
-        }
-    } catch { 
-        Write-Host "[Discovery] Error in Get-TailscalePeers: $($_.Exception.Message)"
-    }
-    return @()
-}
+$slotCount = $slots.Count
+Write-Host "Discovery listening on UDP 0.0.0.0:$DiscoveryPort ($slotCount slot$(if ($slotCount -gt 1) {'s'}))"
+Write-Host "Slot assignment: TTL ${slotTtlSeconds}s, LRU eviction when full"
+if ($lanIp)       { Write-Host "LAN IP       : $lanIp  (local phones + LAN-probe ACK)" }
+if ($tailscaleIp) { Write-Host "Tailscale IP : $tailscaleIp  (Tailscale peers)" }
+if ($conflictUdp) { Write-Host "Conflict detection active on UDP $ClientDiscoveryPort" }
 
-Write-Host "[Discovery] Listening on UDP $DiscoveryPort"
-$lastPulse = (Get-Date).AddSeconds(-10)
-$lastLoopWarning = (Get-Date).AddSeconds(-10)
-
-while ($true) {
-    try {
-        $ep = New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Any, 0)
-        $bytes = $null
+$shouldStop = $false
+try {
+    $lastPulse           = (Get-Date).AddSeconds(-10)
+    $lastConflictWarning = (Get-Date).AddSeconds(-60)
+    while (-not $shouldStop) {
         try {
-            $bytes = $udp.Receive([ref]$ep)
+            $bytes   = $udp.Receive([ref]$endpoint)
+            $message = [System.Text.Encoding]::UTF8.GetString($bytes)
+
+            if ($message -eq "PROJECTO_STREAM_DISCOVER") {
+                # Full discovery — assign slot and reply with complete offer.
+                $reply = [System.Text.Encoding]::UTF8.GetBytes(
+                    (New-DiscoveryPayload -ProbeSourceIp $endpoint.Address.ToString()))
+                [void]$udp.Send($reply, $reply.Length, $endpoint)
+
+            } elseif ($message -eq "PROJECTO_STREAM_LAN_PROBE") {
+                # Lightweight LAN reachability check — ACK without touching slot state.
+                $ack = [System.Text.Encoding]::UTF8.GetBytes("PROJECTO_STREAM_LAN_ACK")
+                [void]$udp.Send($ack, $ack.Length, $endpoint)
+            }
+        } catch [System.Net.Sockets.SocketException] {
+            if ($_.Exception.SocketErrorCode -ne [System.Net.Sockets.SocketError]::TimedOut) {
+                Write-Host "[Discovery] probe socket error ($($_.Exception.SocketErrorCode)); continuing."
+            }
         } catch {
-            $socketError = $_.Exception
-            if ($socketError.InnerException -is [System.Net.Sockets.SocketException]) {
-                $socketError = $socketError.InnerException
-            }
-            if (-not ($socketError -is [System.Net.Sockets.SocketException]) -or
-                $socketError.SocketErrorCode -notin @(
-                    [System.Net.Sockets.SocketError]::TimedOut,
-                    [System.Net.Sockets.SocketError]::WouldBlock
-                )) {
-                throw
-            }
+            Write-Host "[Discovery] unexpected error: $($_.Exception.Message)"
         }
 
-        if ($bytes) {
-            $msg = [System.Text.Encoding]::UTF8.GetString($bytes)
-            if ($msg -eq "PROJECTO_STREAM_DISCOVER") {
-                $probe = if ($ep -and $ep.Address) { $ep.Address.ToString() } else { "0.0.0.0" }
-                $json = New-DiscoveryPayload -ProbeSourceIp $probe
-                $data = [System.Text.Encoding]::UTF8.GetBytes($json)
-                [void]$udp.Send($data, $data.Length, $ep)
-            }
-        }
-    } catch {
-        if (((Get-Date) - $lastLoopWarning).TotalSeconds -ge 5) {
-            Write-Host "[Discovery] Loop warning: $($_.Exception.Message)"
-            $lastLoopWarning = Get-Date
-        }
-    }
-
-    if (((Get-Date) - $lastPulse).TotalMilliseconds -ge 2000) {
-        if ($pulseUdp) {
-            $jsonPulse = New-DiscoveryPayload -ProbeSourceIp "100.0.0.1"
-            $pdata = [System.Text.Encoding]::UTF8.GetBytes($jsonPulse)
-            $peers = Get-TailscalePeers
-            foreach ($pip in $peers) {
-                if ($pip) {
-                    try { [void]$pulseUdp.Send($pdata, $pdata.Length, $pip, $ClientDiscoveryPort) } catch { }
+        if ($conflictUdp) {
+            try {
+                $cfBytes = $conflictUdp.Receive([ref]$conflictEndpoint)
+                $cfMsg   = [System.Text.Encoding]::UTF8.GetString($cfBytes)
+                try {
+                    $offer = $cfMsg | ConvertFrom-Json
+                    if ($offer -and $offer.service -eq "project-o-stream" `
+                            -and $tailscaleIp -and $offer.host `
+                            -and $offer.host -ne $tailscaleIp -and $offer.host -ne $lanIp) {
+                        if (((Get-Date) - $lastConflictWarning).TotalSeconds -ge 30) {
+                            $peerName = if ($offer.hostname) { $offer.hostname } else { $conflictEndpoint.Address.ToString() }
+                            Write-Host ""
+                            Write-Host "=== RECEIVER CONFLICT WARNING ==="
+                            Write-Host "  Another Project O receiver: $peerName ($($conflictEndpoint.Address.ToString()))"
+                            Write-Host "  Stop it if mobile connects to the wrong host."
+                            Write-Host "================================="
+                            $lastConflictWarning = Get-Date
+                        }
+                    }
+                } catch { }
+            } catch [System.Net.Sockets.SocketException] {
+                if ($_.Exception.SocketErrorCode -ne [System.Net.Sockets.SocketError]::TimedOut) {
+                    Write-Host "[Discovery] conflict socket error ($($_.Exception.SocketErrorCode)); continuing."
                 }
-            }
+            } catch { }
         }
-        $lastPulse = Get-Date
+
+        if (-not $shouldStop -and ((Get-Date) - $lastPulse).TotalMilliseconds -ge 1000) {
+            Send-OffersToPeers
+            $lastPulse = Get-Date
+        }
     }
-    Start-Sleep -Milliseconds 50
+} finally {
+    $udp.Close()
+    $pulseUdp.Close()
+    if ($conflictUdp) { $conflictUdp.Close() }
 }
