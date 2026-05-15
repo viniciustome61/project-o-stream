@@ -142,7 +142,11 @@ final class CameraController: NSObject {
                 throw StreamError.invalidArguments
             }
             print("[PO] connecting SRT: \(urlString)")
-            try await connection.connect(url)
+            do {
+                try await connection.connect(url)
+            } catch {
+                throw StreamError.connectionFailed(host: host, port: port, underlying: error)
+            }
             await stream.publish()
             streaming = true
             print("[PO] stream live")

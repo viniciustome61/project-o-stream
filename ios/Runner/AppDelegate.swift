@@ -277,6 +277,7 @@ class AppDelegate: FlutterAppDelegate, FlutterStreamHandler {
 enum StreamError: LocalizedError {
     case invalidArguments
     case srtTransportUnavailable
+    case connectionFailed(host: String, port: Int, underlying: Error)
 
     var errorDescription: String? {
         switch self {
@@ -284,6 +285,8 @@ enum StreamError: LocalizedError {
             return "Invalid stream configuration."
         case .srtTransportUnavailable:
             return "iOS SRT transport requires linking libsrt.xcframework in the iOS build."
+        case let .connectionFailed(host, port, underlying):
+            return "SRT connect failed to \(host):\(port). Start OBS with the SRT listener, or run the Windows relay receiver, then retry. \(underlying.localizedDescription)"
         }
     }
 }

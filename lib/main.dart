@@ -73,6 +73,9 @@ class _SenderScreenState extends State<SenderScreen> {
   bool _previewStarted = false;
   bool _useNativePreview = true;
   final Completer<void> _firstFrameReady = Completer<void>();
+  static const _minAutoReconnectDelay = Duration(seconds: 2);
+  static const _maxAutoReconnectDelay = Duration(seconds: 15);
+  Duration _autoReconnectDelay = _minAutoReconnectDelay;
 
   // ── debug overlay ──────────────────────────────────────────────
   final List<String> _log = [];
@@ -226,17 +229,36 @@ class _SenderScreenState extends State<SenderScreen> {
       _stats = event['stats']?.toString() ?? _stats;
       _live = nextLive;
     });
-    if (!nextLive && _config.autoReconnect) {
+    if (nextLive) {
+      _resetAutoReconnectDelay();
+    }
+    if (!nextLive && _config.autoReconnect && status != 'Connecting') {
       _scheduleAutoConnect();
     }
   }
 
-  void _scheduleAutoConnect([Duration delay = const Duration(seconds: 2)]) {
+  void _scheduleAutoConnect([Duration? delay]) {
+    final retryDelay = delay ?? _autoReconnectDelay;
     _autoConnectTimer?.cancel();
-    _autoConnectTimer = Timer(delay, () {
+    _dbg('Auto reconnect in ${retryDelay.inSeconds}s');
+    _autoConnectTimer = Timer(retryDelay, () {
       if (!mounted || _live || _busy) return;
       unawaited(_ensureLive());
     });
+  }
+
+  void _resetAutoReconnectDelay() {
+    _autoReconnectDelay = _minAutoReconnectDelay;
+  }
+
+  void _increaseAutoReconnectDelay() {
+    final nextSeconds = (_autoReconnectDelay.inSeconds * 2)
+        .clamp(
+          _minAutoReconnectDelay.inSeconds,
+          _maxAutoReconnectDelay.inSeconds,
+        )
+        .toInt();
+    _autoReconnectDelay = Duration(seconds: nextSeconds);
   }
 
   Future<void> _waitForFirstFrame() async {
@@ -259,6 +281,7 @@ class _SenderScreenState extends State<SenderScreen> {
       }
       if (_receiver == null) {
         setState(() => _status = 'No receiver found');
+        _increaseAutoReconnectDelay();
         _scheduleAutoConnect();
         return;
       }
@@ -269,6 +292,7 @@ class _SenderScreenState extends State<SenderScreen> {
         _live = true;
         _status = 'Live';
       });
+      _resetAutoReconnectDelay();
     } catch (error) {
       String msg = error.toString();
       if (error is PlatformException) {
@@ -277,6 +301,7 @@ class _SenderScreenState extends State<SenderScreen> {
       _dbg('Stream error: $msg');
       setState(() => _status = 'Stream error: $msg');
       if (_config.autoReconnect) {
+        _increaseAutoReconnectDelay();
         _scheduleAutoConnect();
       }
     } finally {

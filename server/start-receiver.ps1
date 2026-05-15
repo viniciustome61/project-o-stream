@@ -78,7 +78,7 @@ if ($Health) {
         discoveryEnabled = -not $NoDiscovery
         directToObs      = [bool]$DirectToObs
         obsInput         = if ($DirectToObs) {
-            "srt://0.0.0.0:$($SrtPort)?mode=listener&latency=$($latencyVal)"
+            "srt://0.0.0.0:$($SrtPort)?mode=listener&latency=$($latencyVal)&pkt_size=1316"
         } else {
             "udp://127.0.0.1:$ObsUdpPort"
         }
@@ -272,6 +272,9 @@ Write-Host ""
 
 if ($DirectToObs) {
     Write-Host "[Receiver] Direct-to-OBS mode. Phone connects directly to OBS via SRT."
+    Write-Host "[Receiver] OBS owns the SRT listener here, so this console will not show connection frames."
+    Write-Host "[Receiver] Watch the OBS Media Source output/status for the live connection."
+    Write-Host "[Receiver] For console connection logs, run start-receiver.ps1 without -DirectToObs and use OBS input udp://127.0.0.1:$ObsUdpPort."
     if ($script:discoveryDisabledForRun) {
         Write-Host "[Receiver] Discovery disabled for this run. Restart after freeing UDP $discoveryPort."
     } else {
@@ -293,7 +296,7 @@ if ($DirectToObs) {
 }
 
 # --- Legacy relay mode (ffmpeg → UDP → OBS) ---
-$inputUrl = "srt://0.0.0.0:$($SrtPort)?mode=listener&latency=$latencyVal"
+$inputUrl = "srt://0.0.0.0:$($SrtPort)?mode=listener&transtype=live&latency=$latencyVal&rcvlatency=$latencyVal&peerlatency=$latencyVal&tlpktdrop=1&pkt_size=1316"
 $target = "udp://127.0.0.1:$($ObsUdpPort)?pkt_size=1316"
 
 $ffmpegArgs = @(
