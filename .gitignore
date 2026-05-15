@@ -36,6 +36,9 @@ tmp/
 .DS_Store
 Thumbs.db
 
+# Claude Code internal state
+.claude/
+
 # iOS generated files (produced by flutter pub get / pod install)
 ios/Flutter/Generated.xcconfig
 ios/Flutter/flutter_export_environment.sh
