@@ -54,7 +54,7 @@ class _SenderScreenState extends State<SenderScreen> {
     profile: quality4k30,
     useHevc: false,
     microphone: true,
-    lens: 'back',
+    lens: 'wide',
     latencyMs: 80,
     autoReconnect: true,
     keepScreenOn: true,
@@ -148,7 +148,9 @@ class _SenderScreenState extends State<SenderScreen> {
         _busy = false;
         _status = _receiver == null ? 'Searching receiver' : 'Receiver ready';
       });
-      _scheduleAutoConnect(const Duration(seconds: 2));
+      if (_config.autoReconnect) {
+        _scheduleAutoConnect(const Duration(seconds: 2));
+      }
       _dbg('boot complete. status=$_status');
     } catch (error) {
       _dbg('boot ERROR: $error');
@@ -261,6 +263,51 @@ class _SenderScreenState extends State<SenderScreen> {
     _autoReconnectDelay = Duration(seconds: nextSeconds);
   }
 
+  List<String> get _availableLensIds {
+    final raw = _capabilities['lenses'];
+    final ids = <String>[];
+    if (raw is List) {
+      for (final item in raw) {
+        if (item is Map && item['id'] is String) {
+          ids.add(item['id'] as String);
+        } else if (item is String) {
+          ids.add(item);
+        }
+      }
+    }
+    if (ids.isEmpty) {
+      ids.addAll(const ['ultraWide', 'wide', 'telephoto', 'front']);
+    }
+    if (!ids.contains(_config.lens)) {
+      ids.insert(0, _config.lens);
+    }
+    return ids.toSet().toList(growable: false);
+  }
+
+  String _lensLabel(String lens) {
+    return switch (lens) {
+      'ultraWide' => '0.5x Ultra',
+      'telephoto' => 'Tele',
+      'front' => 'Front',
+      _ => '1x Wide',
+    };
+  }
+
+  void _setAutoReconnect(bool value) {
+    setState(() {
+      _config = _config.copyWith(autoReconnect: value);
+      _status = value ? 'Auto reconnect on' : 'Auto reconnect off';
+    });
+    if (!value) {
+      _autoConnectTimer?.cancel();
+      return;
+    }
+    _resetAutoReconnectDelay();
+    if (!_live && !_busy) {
+      _scheduleAutoConnect();
+    }
+  }
+
   Future<void> _waitForFirstFrame() async {
     if (_firstFrameReady.isCompleted) return;
     try {
@@ -281,8 +328,10 @@ class _SenderScreenState extends State<SenderScreen> {
       }
       if (_receiver == null) {
         setState(() => _status = 'No receiver found');
-        _increaseAutoReconnectDelay();
-        _scheduleAutoConnect();
+        if (_config.autoReconnect) {
+          _increaseAutoReconnectDelay();
+          _scheduleAutoConnect();
+        }
         return;
       }
       await camera.release();
@@ -311,18 +360,32 @@ class _SenderScreenState extends State<SenderScreen> {
 
   Future<void> _switchCamera() async {
     if (_busy) return;
+    final lenses = _availableLensIds;
+    final current = lenses.indexOf(_config.lens);
+    final next = lenses[(current + 1) % lenses.length];
+    await _setLens(next);
+  }
+
+  Future<void> _setLens(String lens) async {
+    if (_busy) return;
+    final previousLens = _config.lens;
     try {
-      if (_live) {
-        await NativeStreamer.switchCamera();
+      if (_useNativePreview || _live) {
+        await NativeStreamer.setLens(lens);
       } else {
-        await context.read<CameraState>().switchCamera();
+        await context.read<CameraState>().setLens(lens);
       }
       setState(() {
+        _config = _config.copyWith(lens: lens);
         _torch = false;
-        _status = 'Camera switched';
+        _zoom = 1;
+        _status = 'Lens ${_lensLabel(lens)}';
       });
     } catch (error) {
-      setState(() => _status = 'Camera switch failed: $error');
+      setState(() {
+        _config = _config.copyWith(lens: previousLens);
+        _status = 'Lens switch failed: $error';
+      });
     }
   }
 
@@ -421,6 +484,7 @@ class _SenderScreenState extends State<SenderScreen> {
                   config: _config,
                   receiver: _receiver,
                   capabilities: _capabilities,
+                  availableLensIds: _availableLensIds,
                   expanded: _settingsExpanded,
                   onToggleExpanded: () {
                     setState(() => _settingsExpanded = !_settingsExpanded);
@@ -440,9 +504,11 @@ class _SenderScreenState extends State<SenderScreen> {
                   onMicrophoneChanged: (value) => setState(() {
                     _config = _config.copyWith(microphone: value);
                   }),
+                  onLensChanged: (lens) => unawaited(_setLens(lens)),
                   onLatencyChanged: (value) => setState(() {
                     _config = _config.copyWith(latencyMs: value.round());
                   }),
+                  onAutoReconnectChanged: _setAutoReconnect,
                   onKeepScreenOnChanged: (value) async {
                     await NativeStreamer.setKeepScreenOn(value);
                     setState(
@@ -698,35 +764,42 @@ class _SettingsPanel extends StatelessWidget {
     required this.config,
     required this.receiver,
     required this.capabilities,
+    required this.availableLensIds,
     required this.expanded,
     required this.onToggleExpanded,
     required this.onDiscover,
     required this.onProfileChanged,
     required this.onCodecChanged,
     required this.onMicrophoneChanged,
+    required this.onLensChanged,
     required this.onLatencyChanged,
+    required this.onAutoReconnectChanged,
     required this.onKeepScreenOnChanged,
   });
 
   final SenderConfig config;
   final DiscoveredReceiver? receiver;
   final Map<String, Object?> capabilities;
+  final List<String> availableLensIds;
   final bool expanded;
   final VoidCallback onToggleExpanded;
   final Future<void> Function() onDiscover;
   final ValueChanged<StreamProfile> onProfileChanged;
   final ValueChanged<bool> onCodecChanged;
   final ValueChanged<bool> onMicrophoneChanged;
+  final ValueChanged<String> onLensChanged;
   final ValueChanged<double> onLatencyChanged;
+  final ValueChanged<bool> onAutoReconnectChanged;
   final ValueChanged<bool> onKeepScreenOnChanged;
 
   @override
   Widget build(BuildContext context) {
+    final maxPanelHeight = MediaQuery.sizeOf(context).height * .46;
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 16),
       decoration: BoxDecoration(
         color: Colors.black.withValues(alpha: .65),
-        borderRadius: BorderRadius.circular(24),
+        borderRadius: BorderRadius.circular(20),
         border: Border.all(color: Colors.white10),
         boxShadow: [
           BoxShadow(
@@ -737,35 +810,46 @@ class _SettingsPanel extends StatelessWidget {
         ],
       ),
       child: ClipRRect(
-        borderRadius: BorderRadius.circular(24),
+        borderRadius: BorderRadius.circular(20),
         child: AnimatedSize(
           duration: const Duration(milliseconds: 250),
           curve: Curves.fastOutSlowIn,
           alignment: Alignment.topCenter,
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                _buildHeader(context),
-                if (!expanded) _buildMiniStatus(context),
-                if (expanded) ...[
-                  const Divider(height: 32, color: Colors.white10),
-                  _buildSectionTitle('QUALITY'),
-                  _buildProfileSelector(),
-                  const SizedBox(height: 16),
-                  _buildSectionTitle('TRANSPORT'),
-                  _buildLatencySlider(),
-                  const SizedBox(height: 16),
-                  _buildSectionTitle('HARDWARE'),
-                  _buildHardwareToggles(),
-                  const SizedBox(height: 16),
-                  _buildSectionTitle('SYSTEM'),
-                  _buildSystemToggles(),
-                  const SizedBox(height: 16),
-                  _buildCapabilitiesFooter(context),
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight: expanded ? maxPanelHeight : 140,
+            ),
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(12),
+              physics: expanded
+                  ? const BouncingScrollPhysics()
+                  : const NeverScrollableScrollPhysics(),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _buildHeader(context),
+                  if (!expanded) _buildMiniStatus(context),
+                  if (expanded) ...[
+                    const Divider(height: 22, color: Colors.white10),
+                    _buildSectionTitle('QUALITY'),
+                    _buildProfileSelector(),
+                    const SizedBox(height: 12),
+                    _buildSectionTitle('LENS'),
+                    _buildLensSelector(),
+                    const SizedBox(height: 12),
+                    _buildSectionTitle('TRANSPORT'),
+                    _buildLatencySlider(),
+                    const SizedBox(height: 12),
+                    _buildSectionTitle('HARDWARE'),
+                    _buildHardwareToggles(),
+                    const SizedBox(height: 12),
+                    _buildSectionTitle('SYSTEM'),
+                    _buildSystemToggles(),
+                    const SizedBox(height: 12),
+                    _buildCapabilitiesFooter(context),
+                  ],
                 ],
-              ],
+              ),
             ),
           ),
         ),
@@ -854,19 +938,27 @@ class _SettingsPanel extends StatelessWidget {
               label: config.profile.name,
               icon: Icons.video_camera_back_outlined),
           const SizedBox(width: 8),
-          _StatusChip(
-              label: '${config.latencyMs}ms', icon: Icons.timer_outlined),
+          _StatusChip(label: _lensLabel(config.lens), icon: Icons.camera),
           const SizedBox(width: 8),
           _StatusChip(
-              label: config.useHevc ? 'HEVC' : 'H.264', icon: Icons.memory),
+              label: '${config.latencyMs}ms', icon: Icons.timer_outlined),
         ],
       ),
     );
   }
 
+  String _lensLabel(String lens) {
+    return switch (lens) {
+      'ultraWide' => '0.5x',
+      'telephoto' => 'Tele',
+      'front' => 'Front',
+      _ => '1x',
+    };
+  }
+
   Widget _buildSectionTitle(String title) {
     return Padding(
-      padding: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.only(bottom: 8),
       child: Align(
         alignment: Alignment.centerLeft,
         child: Text(
@@ -884,82 +976,116 @@ class _SettingsPanel extends StatelessWidget {
 
   Widget _buildProfileSelector() {
     return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(8),
       decoration: BoxDecoration(
         color: Colors.white.withValues(alpha: .03),
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: BorderRadius.circular(14),
       ),
-      child: Column(
-        children: profiles.map((p) {
-          final selected = config.profile.name == p.name;
-          return Material(
-            color: Colors.transparent,
-            child: InkWell(
-              onTap: () => onProfileChanged(p),
-              child: Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                decoration: BoxDecoration(
-                  border: Border(
-                    bottom: p == profiles.last
-                        ? BorderSide.none
-                        : const BorderSide(color: Colors.white10),
-                  ),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          children: profiles.map((p) {
+            final selected = config.profile.name == p.name;
+            return Padding(
+              padding: EdgeInsets.only(right: p == profiles.last ? 0 : 8),
+              child: ChoiceChip(
+                selected: selected,
+                showCheckmark: false,
+                label: Text('${p.name}  ${p.bitrate ~/ 1000000}M'),
+                labelStyle: TextStyle(
+                  color: selected ? Colors.white : Colors.white60,
+                  fontSize: 12,
+                  fontWeight: selected ? FontWeight.w800 : FontWeight.w500,
                 ),
-                child: Row(
-                  children: [
-                    Icon(
-                      selected ? Icons.check_circle : Icons.circle_outlined,
-                      size: 18,
-                      color: selected ? Colors.redAccent : Colors.white10,
-                    ),
-                    const SizedBox(width: 16),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            p.name,
-                            style: TextStyle(
-                              color: selected ? Colors.white : Colors.white70,
-                              fontWeight: selected
-                                  ? FontWeight.bold
-                                  : FontWeight.normal,
-                            ),
-                          ),
-                          Text(
-                            p.description,
-                            style: const TextStyle(
-                              color: Colors.white30,
-                              fontSize: 11,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    Text(
-                      '${p.bitrate ~/ 1000000}M',
-                      style: const TextStyle(
-                        color: Colors.white24,
-                        fontSize: 11,
-                        fontFamily: 'monospace',
-                      ),
-                    ),
-                  ],
+                selectedColor: Colors.redAccent.withValues(alpha: .28),
+                backgroundColor: Colors.white.withValues(alpha: .04),
+                side: BorderSide(
+                  color: selected
+                      ? Colors.redAccent.withValues(alpha: .5)
+                      : Colors.white10,
                 ),
+                onSelected: (_) => onProfileChanged(p),
               ),
-            ),
-          );
-        }).toList(),
+            );
+          }).toList(),
+        ),
       ),
     );
   }
 
-  Widget _buildLatencySlider() {
+  Widget _buildLensSelector() {
+    final lenses = availableLensIds.contains(config.lens)
+        ? availableLensIds
+        : [config.lens, ...availableLensIds];
     return Container(
-      padding: const EdgeInsets.all(12),
+      width: double.infinity,
+      padding: const EdgeInsets.all(8),
       decoration: BoxDecoration(
         color: Colors.white.withValues(alpha: .03),
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          children: lenses.map((lens) {
+            final selected = config.lens == lens;
+            return Padding(
+              padding: EdgeInsets.only(right: lens == lenses.last ? 0 : 8),
+              child: ChoiceChip(
+                selected: selected,
+                showCheckmark: false,
+                avatar: Icon(
+                  _lensIcon(lens),
+                  size: 15,
+                  color: selected ? Colors.white : Colors.white38,
+                ),
+                label: Text(_lensName(lens)),
+                labelStyle: TextStyle(
+                  color: selected ? Colors.white : Colors.white60,
+                  fontSize: 12,
+                  fontWeight: selected ? FontWeight.w800 : FontWeight.w500,
+                ),
+                selectedColor: Colors.redAccent.withValues(alpha: .28),
+                backgroundColor: Colors.white.withValues(alpha: .04),
+                side: BorderSide(
+                  color: selected
+                      ? Colors.redAccent.withValues(alpha: .5)
+                      : Colors.white10,
+                ),
+                onSelected: (_) => onLensChanged(lens),
+              ),
+            );
+          }).toList(),
+        ),
+      ),
+    );
+  }
+
+  String _lensName(String lens) {
+    return switch (lens) {
+      'ultraWide' => '0.5x Ultra',
+      'telephoto' => 'Telephoto',
+      'front' => 'Front',
+      _ => '1x Wide',
+    };
+  }
+
+  IconData _lensIcon(String lens) {
+    return switch (lens) {
+      'ultraWide' => Icons.panorama_wide_angle,
+      'telephoto' => Icons.center_focus_strong,
+      'front' => Icons.face,
+      _ => Icons.camera,
+    };
+  }
+
+  Widget _buildLatencySlider() {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: .03),
+        borderRadius: BorderRadius.circular(14),
       ),
       child: Column(
         children: [
@@ -1024,12 +1150,26 @@ class _SettingsPanel extends StatelessWidget {
   }
 
   Widget _buildSystemToggles() {
-    return _ToggleTile(
-      label: 'Prevent Screen Sleep',
-      value: config.keepScreenOn,
-      onChanged: onKeepScreenOnChanged,
-      icon: Icons.brightness_6_outlined,
-      wide: true,
+    return Row(
+      children: [
+        Expanded(
+          child: _ToggleTile(
+            label: 'Auto Reconnect',
+            value: config.autoReconnect,
+            onChanged: onAutoReconnectChanged,
+            icon: Icons.sync,
+          ),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: _ToggleTile(
+            label: 'Keep Awake',
+            value: config.keepScreenOn,
+            onChanged: onKeepScreenOnChanged,
+            icon: Icons.brightness_6_outlined,
+          ),
+        ),
+      ],
     );
   }
 
@@ -1087,14 +1227,12 @@ class _ToggleTile extends StatelessWidget {
     required this.value,
     required this.onChanged,
     required this.icon,
-    this.wide = false,
   });
 
   final String label;
   final bool value;
   final ValueChanged<bool> onChanged;
   final IconData icon;
-  final bool wide;
 
   @override
   Widget build(BuildContext context) {
@@ -1104,10 +1242,10 @@ class _ToggleTile extends StatelessWidget {
         onTap: () => onChanged(!value),
         borderRadius: BorderRadius.circular(16),
         child: Container(
-          padding: const EdgeInsets.all(12),
+          padding: const EdgeInsets.fromLTRB(12, 8, 6, 8),
           decoration: BoxDecoration(
             color: Colors.white.withValues(alpha: .03),
-            borderRadius: BorderRadius.circular(16),
+            borderRadius: BorderRadius.circular(14),
             border: Border.all(
               color: value
                   ? Colors.redAccent.withValues(alpha: .3)
@@ -1126,20 +1264,21 @@ class _ToggleTile extends StatelessWidget {
                 child: Text(
                   label,
                   style: TextStyle(
-                    fontSize: 12,
+                    fontSize: 11,
                     color: value ? Colors.white : Colors.white60,
                   ),
                 ),
               ),
-              if (wide) ...[
-                const Spacer(),
-                Switch.adaptive(
+              Transform.scale(
+                scale: .72,
+                alignment: Alignment.centerRight,
+                child: Switch.adaptive(
                   value: value,
                   onChanged: onChanged,
                   activeThumbColor: Colors.redAccent,
                   materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
                 ),
-              ],
+              ),
             ],
           ),
         ),

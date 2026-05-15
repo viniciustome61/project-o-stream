@@ -63,6 +63,10 @@ class NativeStreamer {
     await _methods.invokeMethod<void>('switchCamera');
   }
 
+  static Future<void> setLens(String lens) async {
+    await _methods.invokeMethod<void>('setLens', {'lens': lens});
+  }
+
   static Future<void> setTorch(bool enabled) async {
     await _methods.invokeMethod<void>('setTorch', {'enabled': enabled});
   }

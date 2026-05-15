@@ -225,6 +225,7 @@ class AppDelegate: FlutterAppDelegate, FlutterStreamHandler {
                         "hevc": true,
                         "torch": true,
                         "zoom": true,
+                        "lenses": nativeCamera().availableLenses(),
                         "transportStatus": "SRT sender available via HaishinKit",
                         "device": UIDevice.current.model,
                         "os": "\(UIDevice.current.systemName) \(UIDevice.current.systemVersion)"
@@ -244,6 +245,14 @@ class AppDelegate: FlutterAppDelegate, FlutterStreamHandler {
                 case "switchCamera":
                     try await nativeCamera().switchCamera()
                     send(status: "Camera switched", live: camera?.isStreaming == true)
+                    result(nil)
+                case "setLens":
+                    guard let args = call.arguments as? [String: Any],
+                          let lens = args["lens"] as? String else {
+                        throw StreamError.invalidArguments
+                    }
+                    try await nativeCamera().setLens(lens)
+                    send(status: "Lens selected", live: camera?.isStreaming == true)
                     result(nil)
                 case "setTorch":
                     let enabled = (call.arguments as? [String: Any])?["enabled"] as? Bool ?? false
@@ -278,6 +287,7 @@ enum StreamError: LocalizedError {
     case invalidArguments
     case srtTransportUnavailable
     case connectionFailed(host: String, port: Int, underlying: Error)
+    case lensUnavailable(String)
 
     var errorDescription: String? {
         switch self {
@@ -287,6 +297,8 @@ enum StreamError: LocalizedError {
             return "iOS SRT transport requires linking libsrt.xcframework in the iOS build."
         case let .connectionFailed(host, port, underlying):
             return "SRT connect failed to \(host):\(port). Start OBS with the SRT listener, or run the Windows relay receiver, then retry. \(underlying.localizedDescription)"
+        case let .lensUnavailable(lens):
+            return "The \(lens) is not available on this iPhone."
         }
     }
 }

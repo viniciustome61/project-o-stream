@@ -63,6 +63,18 @@ class CameraState extends ChangeNotifier with WidgetsBindingObserver {
     await _openCamera(_selectCamera(_lensDirection));
   }
 
+  Future<void> setLens(String lens) async {
+    final direction =
+        lens == 'front' ? CameraLensDirection.front : CameraLensDirection.back;
+    if (_lensDirection == direction && isReady) return;
+    _lensDirection = direction;
+    if (_cameras.isEmpty) {
+      await initialize();
+      return;
+    }
+    await _openCamera(_selectCamera(_lensDirection));
+  }
+
   Future<void> setTorch(bool enabled) async {
     final controller = _controller;
     if (controller == null || !controller.value.isInitialized) return;
