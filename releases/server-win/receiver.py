@@ -18,7 +18,7 @@ import sys
 import threading
 import time
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Callable, Optional
 
 from rich.align import Align
 from rich.columns import Columns
@@ -146,40 +146,32 @@ class SlotState:
 
 
 # ---------------------------------------------------------------------------
-# Slot assigner (IP-keyed, TTL, LRU eviction)
+# Slot assigner (IP-keyed, TTL, auto-grow)
 # ---------------------------------------------------------------------------
 
 class SlotAssigner:
-    def __init__(self, total: int):
-        self._total = total
+    def __init__(self, slot_count_fn: "Callable[[], int]", grow_fn: "Callable[[], int]"):
+        self._count  = slot_count_fn
+        self._grow   = grow_fn
         self._table: dict[str, tuple[int, float]] = {}  # ip -> (slot, last_seen)
-        self._lock  = threading.Lock()
+        self._lock   = threading.Lock()
 
     def get(self, ip: str) -> int:
         now = time.time()
         with self._lock:
-            # renew if exists
             if ip in self._table:
                 slot, _ = self._table[ip]
                 self._table[ip] = (slot, now)
                 return slot
-            # expire stale entries
-            self._table = {
-                k: v for k, v in self._table.items()
-                if now - v[1] < SLOT_TTL
-            }
-            # find free slot
+            self._table = {k: v for k, v in self._table.items() if now - v[1] < SLOT_TTL}
             used = {v[0] for v in self._table.values()}
-            for idx in range(self._total):
+            for idx in range(self._count()):
                 if idx not in used:
                     self._table[ip] = (idx, now)
                     return idx
-            # LRU eviction
-            oldest_ip = min(self._table, key=lambda k: self._table[k][1])
-            slot = self._table[oldest_ip][0]
-            del self._table[oldest_ip]
-            self._table[ip] = (slot, now)
-            return slot
+            new_idx = self._grow()
+            self._table[ip] = (new_idx, now)
+            return new_idx
 
     def lookup(self, ip: str) -> Optional[int]:
         with self._lock:
@@ -212,7 +204,10 @@ class Receiver:
                 obs_port = args.obs_port + i * 3,
             ))
 
-        self.assigner = SlotAssigner(len(self.slots))
+        self.assigner = SlotAssigner(
+            slot_count_fn=lambda: len(self.slots),
+            grow_fn=self._grow_slot,
+        )
 
         # FFmpeg
         self.ffmpeg_path = args.ffmpeg or "ffmpeg"
@@ -230,6 +225,17 @@ class Receiver:
             _open_firewall(slot.srt_port, "TCP")
         _open_firewall(DISC_PORT, "UDP")
         _open_firewall(TELE_PORT, "UDP")
+
+    # ------------------------------------------------------------------ grow
+
+    def _grow_slot(self) -> int:
+        i = len(self.slots)
+        slot = SlotState(index=i, srt_port=self.args.port + i * 3, obs_port=self.args.obs_port + i * 3)
+        self.slots.append(slot)
+        _open_firewall(slot.srt_port, "UDP")
+        _open_firewall(slot.srt_port, "TCP")
+        self._log_msg(f"Camera {i + 1} added automatically (SRT :{slot.srt_port} → UDP :{slot.obs_port})")
+        return i
 
     # ------------------------------------------------------------------ log
 
@@ -522,13 +528,19 @@ class Receiver:
     def _relay_worker(self) -> None:
         if self.args.direct_to_obs:
             return
-        threads = []
-        for slot in self.slots:
-            t = threading.Thread(target=self._relay_worker_slot, args=(slot,), daemon=True)
-            t.start()
-            threads.append(t)
-        for t in threads:
-            t.join()
+        started: set[int] = set()
+        while not self.stopping:
+            for slot in list(self.slots):
+                if slot.index not in started:
+                    started.add(slot.index)
+                    t = threading.Thread(
+                        target=self._relay_worker_slot,
+                        args=(slot,),
+                        daemon=True,
+                        name=f"relay-{slot.index}",
+                    )
+                    t.start()
+            time.sleep(0.5)
 
     # ------------------------------------------------------------------ run
 
