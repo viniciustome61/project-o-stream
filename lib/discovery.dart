@@ -28,6 +28,10 @@ class ReceiverDiscovery {
   static const int offerPort = 7072;
   static const String probe = 'PROJECTO_STREAM_DISCOVER';
 
+  static bool isUsableEndpointHost(String? value) {
+    return _isUsableEndpointHost(value);
+  }
+
   static Future<DiscoveredReceiver?> find({
     Duration timeout = const Duration(seconds: 4),
     String? cachedHost,
@@ -44,7 +48,11 @@ class ReceiverDiscovery {
         final payload =
             jsonDecode(utf8.decode(datagram.data)) as Map<String, dynamic>;
         if (payload['service'] != 'project-o-stream') return;
-        final host = (payload['host'] as String?) ?? datagram.address.address;
+        final payloadHost = (payload['host'] as String?)?.trim();
+        final datagramHost = datagram.address.address;
+        final host =
+            _isUsableEndpointHost(payloadHost) ? payloadHost! : datagramHost;
+        if (!_isUsableEndpointHost(host)) return;
         if (!seen.add(host) || completer.isCompleted) return;
         final elapsed = DateTime.now().difference(started).inMilliseconds;
         completer.complete(
@@ -93,18 +101,28 @@ class ReceiverDiscovery {
 
     void sendPulse() {
       final payload = utf8.encode(probe);
-      for (final host in _candidateHosts(cachedHost)) {
+      for (final address in _candidateAddresses(cachedHost)) {
         try {
-          probeSocket.send(payload, InternetAddress(host), discoveryPort);
-        } catch (_) {
+          probeSocket.send(payload, address, discoveryPort);
+        } on Object {
           continue;
         }
       }
     }
 
-    pulseTimer =
-        Timer.periodic(const Duration(milliseconds: 350), (_) => sendPulse());
-    sendPulse();
+    void sendPulseSafely() {
+      try {
+        sendPulse();
+      } on Object {
+        // Discovery is opportunistic; server offers on UDP 7072 are enough.
+      }
+    }
+
+    pulseTimer = Timer.periodic(
+      const Duration(milliseconds: 350),
+      (_) => sendPulseSafely(),
+    );
+    sendPulseSafely();
 
     final result =
         await completer.future.timeout(timeout, onTimeout: () => null);
@@ -118,20 +136,73 @@ class ReceiverDiscovery {
     return result;
   }
 
-  static Iterable<String> _candidateHosts(String? cachedHost) sync* {
-    yield '255.255.255.255';
+  static Iterable<InternetAddress> _candidateAddresses(
+    String? cachedHost,
+  ) sync* {
     final cached = cachedHost?.trim();
     if (cached != null && cached.isNotEmpty) {
-      yield cached;
+      final cachedAddress = _parseProbeAddress(cached);
+      if (cachedAddress == null) return;
+
+      yield cachedAddress;
       // Scan the same /24 subnet as the cached host — faster than guessing a hardcoded range.
-      final parts = cached.split('.');
-      if (parts.length == 4) {
+      final parts = cachedAddress.address.split('.');
+      if (_shouldScanSubnet(cachedAddress.address) && parts.length == 4) {
         final prefix = '${parts[0]}.${parts[1]}.${parts[2]}';
         for (var last = 1; last <= 254; last++) {
           final candidate = '$prefix.$last';
-          if (candidate != cached) yield candidate;
+          if (candidate == cachedAddress.address) continue;
+          final address = _parseProbeAddress(candidate);
+          if (address != null) yield address;
         }
       }
     }
+  }
+
+  static InternetAddress? _parseProbeAddress(String value) {
+    final address = InternetAddress.tryParse(value.trim());
+    if (address == null || address.type != InternetAddressType.IPv4) {
+      return null;
+    }
+    if (!_isUsableEndpointHost(address.address)) return null;
+    return address;
+  }
+
+  static bool _isUsableEndpointHost(String? value) {
+    if (value == null) return false;
+    final address = InternetAddress.tryParse(value.trim());
+    if (address == null || address.type != InternetAddressType.IPv4) {
+      return false;
+    }
+
+    final octets = address.address.split('.').map(int.parse).toList();
+    if (octets.length != 4) return false;
+
+    final first = octets[0];
+    final second = octets[1];
+    final allZero = octets.every((octet) => octet == 0);
+    final allOnes = octets.every((octet) => octet == 255);
+    final multicastOrReserved = first >= 224;
+    final loopback = first == 127;
+    final linkLocal = first == 169 && second == 254;
+
+    return !allZero &&
+        !allOnes &&
+        !multicastOrReserved &&
+        !loopback &&
+        !linkLocal;
+  }
+
+  static bool _shouldScanSubnet(String value) {
+    final address = InternetAddress.tryParse(value);
+    if (address == null || address.type != InternetAddressType.IPv4) {
+      return false;
+    }
+    final octets = address.address.split('.').map(int.parse).toList();
+    final first = octets[0];
+    final second = octets[1];
+    return first == 10 ||
+        (first == 172 && second >= 16 && second <= 31) ||
+        (first == 192 && second == 168);
   }
 }

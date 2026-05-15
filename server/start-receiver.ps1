@@ -89,6 +89,103 @@ if ($Health) {
 $discoveryJob = $null
 $discoveryScript = Join-Path $scriptRoot "discovery-server.ps1"
 $lastDiscoveryRestart = (Get-Date).AddSeconds(-10)
+$discoveryDisabledForRun = $false
+$discoveryPort = 7071
+$clientDiscoveryPort = 7072
+
+function Test-UdpPortBindable {
+    param([int]$Port)
+
+    $client = $null
+    try {
+        $client = [System.Net.Sockets.UdpClient]::new()
+        $client.ExclusiveAddressUse = $false
+        $client.Client.SetSocketOption(
+            [System.Net.Sockets.SocketOptionLevel]::Socket,
+            [System.Net.Sockets.SocketOptionName]::ReuseAddress,
+            $true
+        )
+        $client.Client.Bind([System.Net.IPEndPoint]::new([System.Net.IPAddress]::Any, $Port))
+        return $true
+    } catch {
+        return $false
+    } finally {
+        if ($client) {
+            $client.Close()
+        }
+    }
+}
+
+function Get-UdpPortOwners {
+    param([int]$Port)
+
+    $ownerPids = @()
+    try {
+        $ownerPids = Get-NetUDPEndpoint -LocalPort $Port -ErrorAction Stop |
+            Select-Object -ExpandProperty OwningProcess -Unique
+    } catch {
+        $ownerPids = @()
+    }
+
+    foreach ($ownerPid in $ownerPids) {
+        if (-not $ownerPid) { continue }
+        $process = Get-Process -Id $ownerPid -ErrorAction SilentlyContinue
+        [pscustomobject]@{
+            Pid  = [int]$ownerPid
+            Name = if ($process) { $process.ProcessName } else { "Unknown" }
+            Path = if ($process -and $process.Path) { $process.Path } else { "" }
+        }
+    }
+}
+
+function Ensure-DiscoveryPortAvailable {
+    param([int]$Port)
+
+    if (Test-UdpPortBindable -Port $Port) {
+        return $true
+    }
+
+    Write-Host "[Receiver] UDP $Port is blocked. Discovery cannot start while this port is unavailable."
+    $owners = @(Get-UdpPortOwners -Port $Port)
+
+    if ($owners.Count -eq 0) {
+        Write-Host "[Receiver] Windows did not report a process owner for UDP $Port."
+        Write-Host "[Receiver] This can be a reserved/excluded Windows port. Check with:"
+        Write-Host "           netsh int ipv4 show excludedportrange protocol=udp"
+        return $false
+    }
+
+    foreach ($owner in $owners) {
+        $detail = if ($owner.Path) { " ($($owner.Path))" } else { "" }
+        Write-Host "[Receiver] UDP $Port is owned by $($owner.Name) PID $($owner.Pid)$detail"
+
+        if ($owner.Pid -le 4 -or $owner.Pid -eq $PID) {
+            Write-Host "[Receiver] Not safe to kill PID $($owner.Pid). Close that service manually."
+            continue
+        }
+
+        $answer = Read-Host "[Receiver] Kill $($owner.Name) PID $($owner.Pid) so discovery can use UDP $Port? [y/N]"
+        if ($answer -match '^(y|yes|s|sim)$') {
+            try {
+                Stop-Process -Id $owner.Pid -Force -ErrorAction Stop
+                Write-Host "[Receiver] Killed $($owner.Name) PID $($owner.Pid)."
+            } catch {
+                Write-Host "[Receiver] Could not kill PID $($owner.Pid): $($_.Exception.Message)"
+            }
+        } else {
+            Write-Host "[Receiver] Keeping $($owner.Name) PID $($owner.Pid). Discovery disabled for this run."
+            return $false
+        }
+    }
+
+    Start-Sleep -Milliseconds 500
+    if (Test-UdpPortBindable -Port $Port) {
+        return $true
+    }
+
+    Write-Host "[Receiver] UDP $Port is still blocked after cleanup. Discovery disabled for this run."
+    return $false
+}
 
 function Write-DiscoveryJobOutput {
     param($Job)
@@ -101,13 +198,20 @@ function Write-DiscoveryJobOutput {
 
 function Start-DiscoveryJob {
     if ($NoDiscovery) { return }
+    if ($script:discoveryDisabledForRun) { return }
     if (-not (Test-Path -LiteralPath $discoveryScript)) {
         Write-Host "[Receiver] Discovery script not found: $discoveryScript"
         return
     }
 
+    if (-not (Ensure-DiscoveryPortAvailable -Port $script:discoveryPort)) {
+        $script:discoveryDisabledForRun = $true
+        $script:lastDiscoveryRestart = Get-Date
+        return
+    }
+
     try {
-        $script:discoveryJob = Start-Job -FilePath $discoveryScript -ArgumentList 7071, $SrtPort, $ObsUdpPort, 7072
+        $script:discoveryJob = Start-Job -FilePath $discoveryScript -ArgumentList $script:discoveryPort, $SrtPort, $ObsUdpPort, $script:clientDiscoveryPort
         $script:lastDiscoveryRestart = Get-Date
     } catch {
         Write-Host "[Receiver] Discovery server failed to start: $($_.Exception.Message)"
@@ -117,6 +221,7 @@ function Start-DiscoveryJob {
 
 function Ensure-DiscoveryRunning {
     if ($NoDiscovery) { return }
+    if ($script:discoveryDisabledForRun) { return }
     if ($script:discoveryJob -and $script:discoveryJob.State -eq 'Running') {
         Write-DiscoveryJobOutput $script:discoveryJob
         return
@@ -157,15 +262,21 @@ if ($DirectToObs) {
     Write-Host " Output     : udp://127.0.0.1:$($ObsUdpPort)?pkt_size=1316"
     Write-Host " OBS Input  : udp://127.0.0.1:$ObsUdpPort"
 }
-if (-not $NoDiscovery) {
-    Write-Host " Discovery  : UDP 7071 probes, UDP 7072 offers"
+if ($script:discoveryDisabledForRun) {
+    Write-Host " Discovery  : disabled (UDP $discoveryPort blocked)"
+} elseif (-not $NoDiscovery) {
+    Write-Host " Discovery  : UDP $discoveryPort probes, UDP $clientDiscoveryPort offers"
 }
 Write-Host "========================================"
 Write-Host ""
 
 if ($DirectToObs) {
     Write-Host "[Receiver] Direct-to-OBS mode. Phone connects directly to OBS via SRT."
-    Write-Host "[Receiver] Discovery running. Press Ctrl+C to stop."
+    if ($script:discoveryDisabledForRun) {
+        Write-Host "[Receiver] Discovery disabled for this run. Restart after freeing UDP $discoveryPort."
+    } else {
+        Write-Host "[Receiver] Discovery running. Press Ctrl+C to stop."
+    }
     try {
         while ($true) {
             Start-Sleep -Milliseconds 500

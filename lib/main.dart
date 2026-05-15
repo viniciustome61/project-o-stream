@@ -114,7 +114,7 @@ class _SenderScreenState extends State<SenderScreen> {
     final saved = await NativeStreamer.loadSavedEndpoint();
     final host = saved['host'] as String?;
     final port = saved['port'] as int?;
-    if (host == null || host.isEmpty) {
+    if (!ReceiverDiscovery.isUsableEndpointHost(host)) {
       return;
     }
     setState(() {
@@ -124,6 +124,10 @@ class _SenderScreenState extends State<SenderScreen> {
 
   Future<void> _saveHost(String value, int port) async {
     final host = value.trim();
+    if (!ReceiverDiscovery.isUsableEndpointHost(host)) {
+      _dbg('Ignoring invalid receiver host: $host');
+      return;
+    }
     await NativeStreamer.saveEndpoint(host: host, port: port);
     setState(() => _config = _config.copyWith(host: host, port: port));
   }
@@ -188,15 +192,26 @@ class _SenderScreenState extends State<SenderScreen> {
   Future<void> _discover() async {
     _dbg('Searching receiver...');
     setState(() => _status = 'Searching receiver');
-    final receiver = await ReceiverDiscovery.find(cachedHost: _config.host);
-    if (receiver == null) {
+    final DiscoveredReceiver? receiver;
+    try {
+      receiver = await ReceiverDiscovery.find(cachedHost: _config.host);
+    } catch (error) {
+      _dbg('Discovery error: $error');
+      if (mounted) {
+        setState(() => _status = 'Receiver discovery failed');
+      }
+      return;
+    }
+    final found = receiver;
+    if (found == null) {
       _dbg('No receiver found.');
       return;
     }
-    _receiver = receiver;
-    _dbg('Receiver found: ${receiver.label}');
-    await _saveHost(receiver.host, receiver.srtPort);
-    setState(() => _status = 'Receiver ${receiver.label}');
+    _receiver = found;
+    _dbg('Receiver found: ${found.label}');
+    await _saveHost(found.host, found.srtPort);
+    if (!mounted) return;
+    setState(() => _status = 'Receiver ${found.label}');
   }
 
   void _handleNativeEvent(Map<String, Object?> event) {
@@ -755,7 +770,9 @@ class _SettingsPanel extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                receiver == null ? 'Searching for receiver' : receiver!.hostname,
+                receiver == null
+                    ? 'Searching for receiver'
+                    : receiver!.hostname,
                 style: const TextStyle(
                   fontWeight: FontWeight.bold,
                   fontSize: 14,
@@ -809,9 +826,11 @@ class _SettingsPanel extends StatelessWidget {
       child: Row(
         children: [
           _StatusChip(
-              label: config.profile.name, icon: Icons.video_camera_back_outlined),
+              label: config.profile.name,
+              icon: Icons.video_camera_back_outlined),
           const SizedBox(width: 8),
-          _StatusChip(label: '${config.latencyMs}ms', icon: Icons.timer_outlined),
+          _StatusChip(
+              label: '${config.latencyMs}ms', icon: Icons.timer_outlined),
           const SizedBox(width: 8),
           _StatusChip(
               label: config.useHevc ? 'HEVC' : 'H.264', icon: Icons.memory),
@@ -852,7 +871,8 @@ class _SettingsPanel extends StatelessWidget {
             child: InkWell(
               onTap: () => onProfileChanged(p),
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                 decoration: BoxDecoration(
                   border: Border(
                     bottom: p == profiles.last
@@ -876,8 +896,9 @@ class _SettingsPanel extends StatelessWidget {
                             p.name,
                             style: TextStyle(
                               color: selected ? Colors.white : Colors.white70,
-                              fontWeight:
-                                  selected ? FontWeight.bold : FontWeight.normal,
+                              fontWeight: selected
+                                  ? FontWeight.bold
+                                  : FontWeight.normal,
                             ),
                           ),
                           Text(
@@ -1063,7 +1084,9 @@ class _ToggleTile extends StatelessWidget {
             color: Colors.white.withValues(alpha: .03),
             borderRadius: BorderRadius.circular(16),
             border: Border.all(
-              color: value ? Colors.redAccent.withValues(alpha: .3) : Colors.transparent,
+              color: value
+                  ? Colors.redAccent.withValues(alpha: .3)
+                  : Colors.transparent,
             ),
           ),
           child: Row(
@@ -1088,7 +1111,7 @@ class _ToggleTile extends StatelessWidget {
                 Switch.adaptive(
                   value: value,
                   onChanged: onChanged,
-                  activeColor: Colors.redAccent,
+                  activeThumbColor: Colors.redAccent,
                   materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
                 ),
               ],
