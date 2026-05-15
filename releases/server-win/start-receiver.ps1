@@ -2,6 +2,7 @@ param(
     [int]$SrtPort = 7070,
     [int]$ObsUdpPort = 15000,
     [int]$LatencyMs = 80,
+    [switch]$Health,
     [switch]$NoDiscovery,
     [switch]$DirectToObs
 )
@@ -14,7 +15,14 @@ if (-not $scriptRoot -and $PSCommandPath) {
 if (-not $scriptRoot -and $MyInvocation.MyCommand.Path) {
     $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 }
-if (-not $scriptRoot) { $scriptRoot = Get-Location }
+if (-not $scriptRoot) {
+    $candidate = Join-Path (Get-Location) "server"
+    if (Test-Path (Join-Path $candidate "discovery-server.ps1")) {
+        $scriptRoot = $candidate
+    } else {
+        $scriptRoot = Get-Location
+    }
+}
 
 if (-not $DirectToObs) {
     $ffmpeg = Get-Command ffmpeg -ErrorAction SilentlyContinue
@@ -23,9 +31,7 @@ if (-not $DirectToObs) {
         if (Test-Path $fallback) {
             $ffmpeg = Get-Item $fallback
         } else {
-            Write-Host "ERROR: ffmpeg not found in PATH or at $fallback"
-            Write-Host "Install ffmpeg and add it to PATH, or place ffmpeg.exe in this folder."
-            exit 1
+            throw "ffmpeg not found in PATH or at $fallback"
         }
     }
     $ffmpegPath = if ($ffmpeg.Source) { $ffmpeg.Source } else { $ffmpeg.FullName }
@@ -33,7 +39,14 @@ if (-not $DirectToObs) {
 
 $tailscaleIp = $null
 if (Get-Command tailscale -ErrorAction SilentlyContinue) {
-    $tailscaleIp = (& tailscale ip -4 2>$null | Select-Object -First 1)
+    try {
+        $tailscaleOutput = & tailscale ip -4 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            $tailscaleIp = ($tailscaleOutput | Select-Object -First 1)
+        }
+    } catch {
+        $tailscaleIp = $null
+    }
 }
 
 # Ensure Windows Firewall allows inbound traffic on the SRT port.
@@ -49,6 +62,28 @@ if (-not $fwExists) {
     } catch {
         Write-Host "[Receiver] Firewall: could not add rule (run as Administrator to open port $SrtPort): $($_.Exception.Message)"
     }
+}
+
+$latencyVal = $LatencyMs
+
+if ($Health) {
+    [pscustomobject]@{
+        service          = "project-o-stream-receiver"
+        version          = "3.0"
+        tailscaleIp      = $tailscaleIp
+        srtPort          = $SrtPort
+        obsUdpPort       = $ObsUdpPort
+        latencyMs        = $LatencyMs
+        ffmpeg           = if ($DirectToObs) { $null } else { $ffmpegPath }
+        discoveryEnabled = -not $NoDiscovery
+        directToObs      = [bool]$DirectToObs
+        obsInput         = if ($DirectToObs) {
+            "srt://0.0.0.0:$($SrtPort)?mode=listener&latency=$($latencyVal)&pkt_size=1316"
+        } else {
+            "udp://127.0.0.1:$ObsUdpPort"
+        }
+    } | ConvertTo-Json -Depth 4
+    return
 }
 
 $discoveryJob = $null
@@ -103,11 +138,9 @@ function Ensure-DiscoveryRunning {
 
 Start-DiscoveryJob
 
-$latencyUs = $LatencyMs * 1000
-
 Write-Host ""
 Write-Host "========================================"
-Write-Host " Project O Stream - Receiver"
+Write-Host " Stream Receiver"
 Write-Host " SRT listen : srt://0.0.0.0:$SrtPort"
 if ($tailscaleIp) {
     Write-Host " Advertise  : srt://$($tailscaleIp):$SrtPort"
@@ -116,7 +149,7 @@ Write-Host " Latency    : $LatencyMs ms"
 if ($DirectToObs) {
     Write-Host ""
     Write-Host " >> OBS Media Source URL (paste as-is):"
-    Write-Host "    srt://0.0.0.0:$($SrtPort)?mode=listener&latency=$($latencyUs)&pkt_size=1316"
+    Write-Host "    srt://0.0.0.0:$($SrtPort)?mode=listener&latency=$($latencyVal)&pkt_size=1316"
     Write-Host ""
     Write-Host " >> OBS Media Source settings:"
     Write-Host "    [x] Restart playback when source becomes inactive"
@@ -149,7 +182,7 @@ if ($DirectToObs) {
 }
 
 # --- Legacy relay mode (ffmpeg → UDP → OBS) ---
-$inputUrl = "srt://0.0.0.0:$($SrtPort)?mode=listener&transtype=live&latency=$latencyUs&rcvlatency=$latencyUs&peerlatency=$latencyUs&tlpktdrop=1&pkt_size=1316"
+$inputUrl = "srt://0.0.0.0:$($SrtPort)?mode=listener&transtype=live&latency=$latencyVal&rcvlatency=$latencyVal&peerlatency=$latencyVal&tlpktdrop=1&pkt_size=1316"
 $target = "udp://127.0.0.1:$($ObsUdpPort)?pkt_size=1316"
 
 $ffmpegArgs = @(

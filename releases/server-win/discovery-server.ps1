@@ -7,176 +7,138 @@ param(
 
 $ErrorActionPreference = "Continue"
 
-$tailscale = Get-Command tailscale -ErrorAction SilentlyContinue
+Write-Host "[Discovery] Initializing..."
+
 $tailscaleIp = $null
-if ($tailscale) {
-    $tailscaleIp = (& tailscale ip -4 2>$null | Select-Object -First 1)
+if (Get-Command tailscale -ErrorAction SilentlyContinue) {
+    try {
+        $out = & tailscale ip -4 2>$null
+        if ($LASTEXITCODE -eq 0) { $script:tailscaleIp = ($out | Select-Object -First 1) }
+    } catch { }
 }
 
-# Server's own LAN IP — what LAN phones should connect to for SRT.
-# Excludes loopback, APIPA, and Tailscale (100.x) addresses.
 $lanIp = $null
 try {
-    $lanIp = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-        Where-Object {
-            $_.IPAddress -notmatch '^(127\.|169\.254\.|100\.)' -and
-            $_.PrefixOrigin -in @('Dhcp', 'Manual')
-        } | Sort-Object PrefixLength -Descending | Select-Object -First 1).IPAddress
+    $script:lanIp = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+        Where-Object { $_.IPAddress -notmatch '^(127\.|169\.254\.|100\.)' -and $_.PrefixOrigin -in @('Dhcp', 'Manual') } |
+        Sort-Object PrefixLength -Descending | Select-Object -First 1).IPAddress
 } catch { }
 
 $udp = [System.Net.Sockets.UdpClient]::new($DiscoveryPort)
 $udp.EnableBroadcast = $true
 $udp.Client.ReceiveTimeout = 300
 $pulseUdp = [System.Net.Sockets.UdpClient]::new()
-$endpoint = [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Any, 0)
 $hostname = [System.Net.Dns]::GetHostName()
 
-# Listen on the offer port so we detect other running receivers on the Tailnet
 $conflictUdp = $null
-$conflictEndpoint = [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Any, 0)
 try {
     $conflictUdp = [System.Net.Sockets.UdpClient]::new()
     $conflictUdp.ExclusiveAddressUse = $false
-    $conflictUdp.Client.SetSocketOption(
-        [System.Net.Sockets.SocketOptionLevel]::Socket,
-        [System.Net.Sockets.SocketOptionName]::ReuseAddress,
-        $true
-    )
-    $conflictUdp.Client.Bind(
-        [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Any, $ClientDiscoveryPort)
-    )
+    $conflictUdp.Client.SetSocketOption([System.Net.Sockets.SocketOptionLevel]::Socket, [System.Net.Sockets.SocketOptionName]::ReuseAddress, $true)
+    $conflictUdp.Client.Bind([System.Net.IPEndPoint]::new([System.Net.IPAddress]::Any, $ClientDiscoveryPort))
     $conflictUdp.Client.ReceiveTimeout = 50
-} catch {
-    $conflictUdp = $null
-}
+} catch { }
 
 function New-DiscoveryPayload {
     param([string]$ProbeSourceIp)
-
-    # Phone on Tailscale (100.x) -> advertise Tailscale IP so SRT goes over Tailnet.
-    # Phone on LAN -> advertise LAN IP so SRT goes direct without Tailscale on the phone.
-    $advertiseHost = if ($tailscaleIp -and $ProbeSourceIp -match '^100\.') {
-        $tailscaleIp
-    } elseif ($lanIp) {
-        $lanIp
-    } elseif ($tailscaleIp) {
-        $tailscaleIp
-    } else {
-        $ProbeSourceIp
-    }
-
-    @{
-        service = "project-o-stream"
-        version = 1
-        host = $advertiseHost
-        hostname = $hostname
-        srtPort = $SrtPort
-        discoveryPort = $DiscoveryPort
-        clientDiscoveryPort = $ClientDiscoveryPort
-        obsUdpPort = $ObsUdpPort
-        transport = "srt"
-    } | ConvertTo-Json -Compress
-}
-
-function Get-TailscalePeerIps {
-    if (-not $tailscale) {
-        return @()
-    }
-
     try {
-        $status = & tailscale status --json 2>$null | ConvertFrom-Json
+        $adv = if ($script:tailscaleIp -and $ProbeSourceIp -and $ProbeSourceIp -match '^100\.') { $script:tailscaleIp }
+               elseif ($script:lanIp) { $script:lanIp }
+               elseif ($script:tailscaleIp) { $script:tailscaleIp }
+               else { $ProbeSourceIp }
+        if (-not $adv) { $adv = "0.0.0.0" }
+        
+        $payload = @{
+            service = "project-o-stream"
+            version = 1
+            host = $adv
+            hostname = $hostname
+            srtPort = $SrtPort
+            discoveryPort = $DiscoveryPort
+            clientDiscoveryPort = $ClientDiscoveryPort
+            obsUdpPort = $ObsUdpPort
+            transport = "srt"
+            capabilities = @{ duplicateReceiverDetection = $true; tailscalePreferred = [bool]$script:tailscaleIp; obsUdpForward = $true; protocolVersion = "3.0" }
+        }
+        return ($payload | ConvertTo-Json -Compress)
     } catch {
-        return @()
+        Write-Host "[Discovery] Error in New-DiscoveryPayload: $($_.Exception.Message)"
+        return "{}"
     }
-
-    $peers = @()
-    if ($status.Peer) {
-        $peers = $status.Peer.PSObject.Properties.Value
-    }
-
-    $peers |
-        Where-Object { $_.Online -eq $true -and $_.TailscaleIPs } |
-        ForEach-Object { $_.TailscaleIPs | Where-Object { $_ -match '^100\.' -and $_ -ne $tailscaleIp } } |
-        Select-Object -Unique
 }
 
-function Send-OffersToPeers {
-    # Peers are on the Tailnet so they should always connect via Tailscale IP.
-    $payload = [System.Text.Encoding]::UTF8.GetBytes((New-DiscoveryPayload -ProbeSourceIp "100.0.0.1"))
-    foreach ($peerIp in (Get-TailscalePeerIps)) {
-        try {
-            [void]$pulseUdp.Send($payload, $payload.Length, $peerIp, $ClientDiscoveryPort)
-        } catch {
-            continue
+function Get-TailscalePeers {
+    if (-not $script:tailscaleIp) { return @() }
+    try {
+        $statusStr = & tailscale status --json 2>$null
+        if (-not $statusStr) { return @() }
+        $s = $statusStr | ConvertFrom-Json
+        if ($s -and $s.Peer) {
+            $peersObj = $s.Peer
+            # In PowerShell, accessing properties of a dynamic object from JSON can be tricky
+            return $peersObj.PSObject.Properties | 
+                Where-Object { $_.Value -and $_.Value.Online -and $_.Value.TailscaleIPs } | 
+                ForEach-Object { $_.Value.TailscaleIPs | Where-Object { $_ -match '^100\.' } }
         }
+    } catch { 
+        Write-Host "[Discovery] Error in Get-TailscalePeers: $($_.Exception.Message)"
     }
+    return @()
 }
 
-Write-Host "Discovery listening on UDP 0.0.0.0:$DiscoveryPort"
-Write-Host "Discovery offers sent to Tailscale peers on UDP $ClientDiscoveryPort"
-if ($lanIp)       { Write-Host "Advertising LAN IP      $lanIp (for phones on WiFi)" }
-if ($tailscaleIp) { Write-Host "Advertising Tailscale IP $tailscaleIp (for Tailscale peers)" }
-if ($conflictUdp) { Write-Host "Conflict detection active on UDP $ClientDiscoveryPort (warn only)" }
+Write-Host "[Discovery] Listening on UDP $DiscoveryPort"
+$lastPulse = (Get-Date).AddSeconds(-10)
 
-$shouldStop = $false
-try {
-    $lastPulse = (Get-Date).AddSeconds(-10)
-    $lastConflictWarning = (Get-Date).AddSeconds(-60)
-    while (-not $shouldStop) {
+while ($true) {
+    try {
+        $ep = New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Any, 0)
+        $bytes = $null
         try {
-            $bytes = $udp.Receive([ref]$endpoint)
-            $message = [System.Text.Encoding]::UTF8.GetString($bytes)
-            if ($message -eq "PROJECTO_STREAM_DISCOVER") {
-                $payload = New-DiscoveryPayload -ProbeSourceIp $endpoint.Address.ToString()
-                $reply = [System.Text.Encoding]::UTF8.GetBytes($payload)
-                [void]$udp.Send($reply, $reply.Length, $endpoint)
-            }
+            $bytes = $udp.Receive([ref]$ep)
         } catch [System.Net.Sockets.SocketException] {
-            if ($_.Exception.SocketErrorCode -ne [System.Net.Sockets.SocketError]::TimedOut) {
-                Write-Host "[Discovery] probe socket error ($($_.Exception.SocketErrorCode)); continuing."
-            }
-        } catch {
-            Write-Host "[Discovery] probe socket unexpected error: $($_.Exception.Message)"
+            # Timeout is expected
         }
 
-        if ($conflictUdp) {
-            try {
-                $cfBytes = $conflictUdp.Receive([ref]$conflictEndpoint)
-                $cfMsg = [System.Text.Encoding]::UTF8.GetString($cfBytes)
-                try {
-                    $offer = $cfMsg | ConvertFrom-Json
-                    if ($offer -and $offer.service -eq "project-o-stream" `
-                            -and $tailscaleIp `
-                            -and $offer.host `
-                            -and $offer.host -ne $tailscaleIp) {
-                        if (((Get-Date) - $lastConflictWarning).TotalSeconds -ge 30) {
-                            $peerName = if ($offer.hostname) { $offer.hostname } else { $conflictEndpoint.Address.ToString() }
-                            Write-Host ""
-                            Write-Host "=== RECEIVER CONFLICT WARNING ==="
-                            Write-Host "  Another Project O receiver advertised on this Tailnet:"
-                            Write-Host "  Peer     : $peerName ($($conflictEndpoint.Address.ToString()))"
-                            Write-Host "  Action   : Keeping this receiver alive; stop the other one if mobile selects the wrong host."
-                            Write-Host "================================="
-                            $lastConflictWarning = Get-Date
-                        }
-                    }
-                } catch { }
-            } catch [System.Net.Sockets.SocketException] {
-                if ($_.Exception.SocketErrorCode -ne [System.Net.Sockets.SocketError]::TimedOut) {
-                    Write-Host "[Discovery] conflict socket error ($($_.Exception.SocketErrorCode)); continuing."
-                }
-            } catch {
-                Write-Host "[Discovery] conflict socket unexpected error: $($_.Exception.Message)"
+        if ($bytes) {
+            $msg = [System.Text.Encoding]::UTF8.GetString($bytes)
+            if ($msg -eq "PROJECTO_STREAM_DISCOVER") {
+                $probe = if ($ep -and $ep.Address) { $ep.Address.ToString() } else { "0.0.0.0" }
+                $json = New-DiscoveryPayload -ProbeSourceIp $probe
+                $data = [System.Text.Encoding]::UTF8.GetBytes($json)
+                [void]$udp.Send($data, $data.Length, $ep)
             }
         }
-
-        if (-not $shouldStop -and ((Get-Date) - $lastPulse).TotalMilliseconds -ge 1000) {
-            Send-OffersToPeers
-            $lastPulse = Get-Date
-        }
+    } catch {
+        Write-Host "[Discovery] Main Loop Error: $($_.Exception.Message) at $($_.ScriptStackTrace)"
     }
-} finally {
-    $udp.Close()
-    $pulseUdp.Close()
-    if ($conflictUdp) { $conflictUdp.Close() }
+
+    if ($conflictUdp) {
+        try {
+            $cep = New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Any, 0)
+            $cbytes = $null
+            try { $cbytes = $conflictUdp.Receive([ref]$cep) } catch { }
+            if ($cbytes) {
+                $offerJson = [System.Text.Encoding]::UTF8.GetString($cbytes)
+                $offer = $offerJson | ConvertFrom-Json
+                if ($offer -and $offer.service -eq "project-o-stream" -and $script:tailscaleIp -and $offer.host -ne $script:tailscaleIp) {
+                    Write-Host "[Discovery] Conflict detected with $($offer.hostname)"
+                }
+            }
+        } catch { }
+    }
+
+    if (((Get-Date) - $lastPulse).TotalMilliseconds -ge 2000) {
+        if ($pulseUdp) {
+            $jsonPulse = New-DiscoveryPayload -ProbeSourceIp "100.0.0.1"
+            $pdata = [System.Text.Encoding]::UTF8.GetBytes($jsonPulse)
+            $peers = Get-TailscalePeers
+            foreach ($pip in $peers) {
+                if ($pip) {
+                    try { [void]$pulseUdp.Send($pdata, $pdata.Length, $pip, $ClientDiscoveryPort) } catch { }
+                }
+            }
+        }
+        $lastPulse = Get-Date
+    }
+    Start-Sleep -Milliseconds 50
 }

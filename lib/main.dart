@@ -684,142 +684,416 @@ class _SettingsPanel extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 16),
-      padding: EdgeInsets.fromLTRB(14, 10, 10, expanded ? 14 : 10),
       decoration: BoxDecoration(
-        color: Colors.black.withValues(alpha: .58),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.white12),
+        color: Colors.black.withValues(alpha: .65),
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: Colors.white10),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: .4),
+            blurRadius: 20,
+            offset: const Offset(0, 10),
+          ),
+        ],
       ),
-      child: AnimatedSize(
-        duration: const Duration(milliseconds: 180),
-        curve: Curves.easeOutCubic,
-        alignment: Alignment.topCenter,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Row(
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(24),
+        child: AnimatedSize(
+          duration: const Duration(milliseconds: 250),
+          curve: Curves.fastOutSlowIn,
+          alignment: Alignment.topCenter,
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
               children: [
-                Expanded(
-                  child: Text(
-                    receiver == null
-                        ? 'Receiver: searching'
-                        : 'Receiver: ${receiver!.label}',
-                    maxLines: expanded ? 2 : 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-                IconButton(
-                  onPressed: () => unawaited(onDiscover()),
-                  icon: const Icon(Icons.radar),
-                  tooltip: 'Discover receiver',
-                ),
-                IconButton.filledTonal(
-                  onPressed: onToggleExpanded,
-                  icon: Icon(
-                    expanded ? Icons.keyboard_arrow_down : Icons.settings,
-                  ),
-                  tooltip: expanded ? 'Minimize settings' : 'Show settings',
-                ),
+                _buildHeader(context),
+                if (!expanded) _buildMiniStatus(context),
+                if (expanded) ...[
+                  const Divider(height: 32, color: Colors.white10),
+                  _buildSectionTitle('QUALITY'),
+                  _buildProfileSelector(),
+                  const SizedBox(height: 16),
+                  _buildSectionTitle('TRANSPORT'),
+                  _buildLatencySlider(),
+                  const SizedBox(height: 16),
+                  _buildSectionTitle('HARDWARE'),
+                  _buildHardwareToggles(),
+                  const SizedBox(height: 16),
+                  _buildSectionTitle('SYSTEM'),
+                  _buildSystemToggles(),
+                  const SizedBox(height: 16),
+                  _buildCapabilitiesFooter(context),
+                ],
               ],
             ),
-            if (!expanded)
-              Align(
-                alignment: Alignment.centerLeft,
-                child: Text(
-                  '${config.profile.name} | ${config.latencyMs} ms | ${config.useHevc ? 'HEVC' : 'H.264'}',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context)
-                      .textTheme
-                      .labelSmall
-                      ?.copyWith(color: Colors.white60),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildHeader(BuildContext context) {
+    return Row(
+      children: [
+        Container(
+          padding: const EdgeInsets.all(8),
+          decoration: BoxDecoration(
+            color: (receiver != null ? Colors.greenAccent : Colors.white10)
+                .withValues(alpha: .1),
+            shape: BoxShape.circle,
+          ),
+          child: Icon(
+            receiver != null ? Icons.lan : Icons.lan_outlined,
+            size: 18,
+            color: receiver != null ? Colors.greenAccent : Colors.white38,
+          ),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                receiver == null ? 'Searching for receiver' : receiver!.hostname,
+                style: const TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 14,
+                  letterSpacing: 0.2,
                 ),
               ),
-            if (expanded) ...[
-              if (receiver != null)
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: Text(
-                    receiver!.details,
-                    style: Theme.of(context)
-                        .textTheme
-                        .labelSmall
-                        ?.copyWith(color: Colors.white70),
-                  ),
-                ),
-              const SizedBox(height: 12),
-              DropdownButtonFormField<StreamProfile>(
-                initialValue: config.profile,
-                isExpanded: true,
-                decoration: const InputDecoration(labelText: 'Stream profile'),
-                items: [
-                  for (final profile in profiles)
-                    DropdownMenuItem(
-                      value: profile,
-                      child: Text(
-                        '${profile.name} - ${profile.description}',
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                ],
-                onChanged: (profile) {
-                  if (profile != null) onProfileChanged(profile);
-                },
-              ),
-              const SizedBox(height: 10),
-              Row(
-                children: [
-                  Expanded(
-                    child: SwitchListTile(
-                      contentPadding: EdgeInsets.zero,
-                      title: const Text('HEVC'),
-                      value: config.useHevc,
-                      onChanged: onCodecChanged,
-                    ),
-                  ),
-                  Expanded(
-                    child: SwitchListTile(
-                      contentPadding: EdgeInsets.zero,
-                      title: const Text('Mic'),
-                      value: config.microphone,
-                      onChanged: onMicrophoneChanged,
-                    ),
-                  ),
-                ],
-              ),
-              Row(
-                children: [
-                  const Text('SRT latency'),
-                  Expanded(
-                    child: Slider(
-                      value: config.latencyMs.toDouble(),
-                      min: 40,
-                      max: 240,
-                      divisions: 10,
-                      label: '${config.latencyMs} ms',
-                      onChanged: onLatencyChanged,
-                    ),
-                  ),
-                ],
-              ),
-              FilterChip(
-                label: const Text('Keep screen awake'),
-                selected: config.keepScreenOn,
-                onSelected: onKeepScreenOnChanged,
-              ),
-              const SizedBox(height: 8),
-              Align(
-                alignment: Alignment.centerLeft,
-                child: Text(
-                  'Platform: ${capabilities['platform'] ?? 'unknown'} | Transport: ${capabilities['transportStatus'] ?? 'checking'}',
-                  style: Theme.of(context)
-                      .textTheme
-                      .labelSmall
-                      ?.copyWith(color: Colors.white60),
+              Text(
+                receiver == null ? 'UDP 7071/7072' : receiver!.host,
+                style: const TextStyle(
+                  color: Colors.white38,
+                  fontSize: 11,
                 ),
               ),
             ],
-          ],
+          ),
+        ),
+        IconButton(
+          onPressed: () => unawaited(onDiscover()),
+          icon: const Icon(Icons.refresh, size: 20),
+          visualDensity: VisualDensity.compact,
+          color: Colors.white54,
+          tooltip: 'Discover',
+        ),
+        const SizedBox(width: 4),
+        Material(
+          color: Colors.transparent,
+          child: InkWell(
+            onTap: onToggleExpanded,
+            borderRadius: BorderRadius.circular(12),
+            child: Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: Colors.white.withValues(alpha: .05),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Icon(
+                expanded ? Icons.expand_less : Icons.tune,
+                size: 20,
+                color: Colors.white70,
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildMiniStatus(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 12),
+      child: Row(
+        children: [
+          _StatusChip(
+              label: config.profile.name, icon: Icons.video_camera_back_outlined),
+          const SizedBox(width: 8),
+          _StatusChip(label: '${config.latencyMs}ms', icon: Icons.timer_outlined),
+          const SizedBox(width: 8),
+          _StatusChip(
+              label: config.useHevc ? 'HEVC' : 'H.264', icon: Icons.memory),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSectionTitle(String title) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: Text(
+          title,
+          style: const TextStyle(
+            color: Colors.white24,
+            fontSize: 10,
+            fontWeight: FontWeight.w900,
+            letterSpacing: 1.5,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildProfileSelector() {
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: .03),
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Column(
+        children: profiles.map((p) {
+          final selected = config.profile.name == p.name;
+          return Material(
+            color: Colors.transparent,
+            child: InkWell(
+              onTap: () => onProfileChanged(p),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                decoration: BoxDecoration(
+                  border: Border(
+                    bottom: p == profiles.last
+                        ? BorderSide.none
+                        : const BorderSide(color: Colors.white10),
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    Icon(
+                      selected ? Icons.check_circle : Icons.circle_outlined,
+                      size: 18,
+                      color: selected ? Colors.redAccent : Colors.white10,
+                    ),
+                    const SizedBox(width: 16),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            p.name,
+                            style: TextStyle(
+                              color: selected ? Colors.white : Colors.white70,
+                              fontWeight:
+                                  selected ? FontWeight.bold : FontWeight.normal,
+                            ),
+                          ),
+                          Text(
+                            p.description,
+                            style: const TextStyle(
+                              color: Colors.white30,
+                              fontSize: 11,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    Text(
+                      '${p.bitrate ~/ 1000000}M',
+                      style: const TextStyle(
+                        color: Colors.white24,
+                        fontSize: 11,
+                        fontFamily: 'monospace',
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        }).toList(),
+      ),
+    );
+  }
+
+  Widget _buildLatencySlider() {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: .03),
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Column(
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Text('SRT Buffer Latency', style: TextStyle(fontSize: 12)),
+              Text(
+                '${config.latencyMs} ms',
+                style: const TextStyle(
+                  color: Colors.redAccent,
+                  fontWeight: FontWeight.bold,
+                  fontFamily: 'monospace',
+                ),
+              ),
+            ],
+          ),
+          SliderTheme(
+            data: SliderThemeData(
+              trackHeight: 2,
+              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
+              overlayShape: const RoundSliderOverlayShape(overlayRadius: 14),
+              activeTrackColor: Colors.redAccent,
+              inactiveTrackColor: Colors.white10,
+              thumbColor: Colors.redAccent,
+            ),
+            child: Slider(
+              value: config.latencyMs.toDouble(),
+              min: 40,
+              max: 240,
+              divisions: 20,
+              onChanged: onLatencyChanged,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildHardwareToggles() {
+    return Row(
+      children: [
+        Expanded(
+          child: _ToggleTile(
+            label: 'HEVC / H.265',
+            value: config.useHevc,
+            onChanged: onCodecChanged,
+            icon: Icons.high_quality,
+          ),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: _ToggleTile(
+            label: 'Audio Input',
+            value: config.microphone,
+            onChanged: onMicrophoneChanged,
+            icon: Icons.mic,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildSystemToggles() {
+    return _ToggleTile(
+      label: 'Prevent Screen Sleep',
+      value: config.keepScreenOn,
+      onChanged: onKeepScreenOnChanged,
+      icon: Icons.brightness_6_outlined,
+      wide: true,
+    );
+  }
+
+  Widget _buildCapabilitiesFooter(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: .02),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Text(
+        '${capabilities['device'] ?? 'Device'} • ${capabilities['os'] ?? 'OS'} • SRT/HEVC Ready',
+        textAlign: TextAlign.center,
+        style: const TextStyle(
+          color: Colors.white24,
+          fontSize: 10,
+        ),
+      ),
+    );
+  }
+}
+
+class _StatusChip extends StatelessWidget {
+  const _StatusChip({required this.label, required this.icon});
+  final String label;
+  final IconData icon;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: .05),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 12, color: Colors.white38),
+          const SizedBox(width: 6),
+          Text(
+            label,
+            style: const TextStyle(color: Colors.white70, fontSize: 10),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ToggleTile extends StatelessWidget {
+  const _ToggleTile({
+    required this.label,
+    required this.value,
+    required this.onChanged,
+    required this.icon,
+    this.wide = false,
+  });
+
+  final String label;
+  final bool value;
+  final ValueChanged<bool> onChanged;
+  final IconData icon;
+  final bool wide;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: () => onChanged(!value),
+        borderRadius: BorderRadius.circular(16),
+        child: Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: .03),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: value ? Colors.redAccent.withValues(alpha: .3) : Colors.transparent,
+            ),
+          ),
+          child: Row(
+            children: [
+              Icon(
+                icon,
+                size: 18,
+                color: value ? Colors.redAccent : Colors.white24,
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  label,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: value ? Colors.white : Colors.white60,
+                  ),
+                ),
+              ),
+              if (wide) ...[
+                const Spacer(),
+                Switch.adaptive(
+                  value: value,
+                  onChanged: onChanged,
+                  activeColor: Colors.redAccent,
+                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+              ],
+            ],
+          ),
         ),
       ),
     );

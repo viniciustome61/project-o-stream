@@ -149,7 +149,7 @@ Write-Host " Latency    : $LatencyMs ms"
 if ($DirectToObs) {
     Write-Host ""
     Write-Host " >> OBS Media Source URL (paste as-is):"
-    Write-Host "    srt://0.0.0.0:$($SrtPort)?mode=listener&latency=$($latencyUs)&pkt_size=1316"
+    Write-Host "    srt://0.0.0.0:$($SrtPort)?mode=listener&latency=$($latencyVal)&pkt_size=1316"
     Write-Host ""
     Write-Host " >> OBS Media Source settings:"
     Write-Host "    [x] Restart playback when source becomes inactive"
