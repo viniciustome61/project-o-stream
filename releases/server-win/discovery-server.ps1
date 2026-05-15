@@ -78,6 +78,17 @@ function Get-SlotForPhone {
     return $script:slots[[int]$freeIndex]
 }
 
+function Get-TransportForHost {
+    param([string]$HostIp)
+    if ($HostIp -match '^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.') {
+        return "tailscale"
+    }
+    if ($HostIp -match '^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)') {
+        return "lan"
+    }
+    return "srt"
+}
+
 function New-DiscoveryPayload {
     param([string]$ProbeSourceIp)
     $slot = Get-SlotForPhone -PhoneIp $ProbeSourceIp
@@ -105,7 +116,7 @@ function New-DiscoveryPayload {
         totalSlots          = $script:slots.Count
         discoveryPort       = $DiscoveryPort
         clientDiscoveryPort = $ClientDiscoveryPort
-        transport           = "srt"
+        transport           = (Get-TransportForHost -HostIp $advertiseHost)
     } | ConvertTo-Json -Compress
 }
 

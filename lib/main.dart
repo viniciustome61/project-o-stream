@@ -381,11 +381,71 @@ class _SenderScreenState extends State<SenderScreen> {
         'thermalState': info['thermalState'] ?? 'nominal',
         'rttMs': _receiver?.roundTripMs ?? 0,
         'transport': _receiver?.transport ?? '',
+        'slotIndex': _receiver?.slotIndex ?? 0,
       }));
       final socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
       socket.send(payload, InternetAddress(host), _telemetryPort);
       socket.close();
     } catch (_) {}
+  }
+
+  void _setActiveReceiverHost(String host) {
+    final receiver = _receiver;
+    if (receiver == null) return;
+    _receiver = receiver.withActiveHost(host);
+  }
+
+  Future<SenderConfig> _startStreamWithFallback(SenderConfig baseConfig) async {
+    final receiver = _receiver;
+    final primaryHost = receiver?.preferredHost;
+    final primaryConfig = primaryHost != null &&
+            ReceiverDiscovery.isUsableEndpointHost(primaryHost)
+        ? baseConfig.copyWith(host: primaryHost, port: receiver?.srtPort)
+        : baseConfig;
+
+    try {
+      await NativeStreamer.startStream(primaryConfig);
+      _setActiveReceiverHost(primaryConfig.host);
+      return primaryConfig;
+    } catch (primaryError, primaryStack) {
+      final fallbackHost = receiver?.fallbackHost?.trim();
+      if (fallbackHost == null ||
+          fallbackHost.isEmpty ||
+          fallbackHost == primaryConfig.host ||
+          !ReceiverDiscovery.isUsableEndpointHost(fallbackHost)) {
+        Error.throwWithStackTrace(primaryError, primaryStack);
+      }
+
+      final primaryLabel =
+          receiver?.transportForHost(primaryConfig.host).toUpperCase() ??
+              'PRIMARY';
+      final fallbackLabel =
+          receiver?.transportForHost(fallbackHost).toUpperCase() ?? 'BACKUP';
+      _dbg(
+        '$primaryLabel path ${primaryConfig.host} failed: $primaryError. '
+        'Trying $fallbackLabel $fallbackHost.',
+      );
+      if (mounted) {
+        setState(() => _status = '$primaryLabel failed, trying $fallbackLabel');
+      }
+
+      try {
+        await NativeStreamer.stopStream();
+      } catch (_) {}
+      try {
+        await NativeStreamer.initialize();
+      } catch (_) {}
+
+      final fallbackConfig = primaryConfig.copyWith(host: fallbackHost);
+      try {
+        await NativeStreamer.startStream(fallbackConfig);
+        _setActiveReceiverHost(fallbackConfig.host);
+        return fallbackConfig;
+      } catch (fallbackError, fallbackStack) {
+        _dbg('$fallbackLabel path $fallbackHost failed: $fallbackError');
+        Error.throwWithStackTrace(fallbackError, fallbackStack);
+      }
+    }
   }
 
   Future<void> _ensureLive() async {
@@ -407,8 +467,9 @@ class _SenderScreenState extends State<SenderScreen> {
       }
       await camera.release();
       await NativeStreamer.initialize();
-      await NativeStreamer.startStream(_config);
+      final activeConfig = await _startStreamWithFallback(_config);
       setState(() {
+        _config = activeConfig;
         _live = true;
         _status = 'Live';
       });
@@ -464,7 +525,7 @@ class _SenderScreenState extends State<SenderScreen> {
     if (_busy) return;
     final next = !_torch;
     try {
-      if (_live) {
+      if (_live || _useNativePreview) {
         await NativeStreamer.setTorch(next);
       } else {
         await context.read<CameraState>().setTorch(next);
@@ -491,9 +552,10 @@ class _SenderScreenState extends State<SenderScreen> {
     try {
       await NativeStreamer.stopStream();
       await NativeStreamer.initialize();
-      await NativeStreamer.startStream(_config);
+      final activeConfig = await _startStreamWithFallback(_config);
       if (!mounted) return;
       setState(() {
+        _config = activeConfig;
         _live = true;
         _status = 'Live';
       });

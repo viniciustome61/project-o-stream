@@ -65,16 +65,68 @@ def _tailscale_ip() -> Optional[str]:
     return None
 
 
+def _is_tailscale_ip(ip: Optional[str]) -> bool:
+    try:
+        addr = ipaddress.ip_address(ip or "")
+        return addr in ipaddress.ip_network("100.64.0.0/10")
+    except ValueError:
+        return False
+
+
+def _is_lan_ip(ip: Optional[str]) -> bool:
+    try:
+        addr = ipaddress.ip_address(ip or "")
+        return addr.version == 4 and addr.is_private and not addr.is_loopback and not addr.is_link_local
+    except ValueError:
+        return False
+
+
 def _infer_transport(ip: str) -> str:
     try:
         addr = ipaddress.ip_address(ip)
+        if _is_tailscale_ip(ip):
+            return "tailscale"
         if addr.is_private:
-            if str(addr).startswith("100."):
-                return "tailscale"
             return "lan"
         return "wan"
     except ValueError:
         return "lan"
+
+
+def _advertise_host(probe_source_ip: str, lan_ip: str, tailscale_ip: Optional[str]) -> str:
+    if _is_lan_ip(probe_source_ip) and _is_lan_ip(lan_ip):
+        return lan_ip
+    if _is_tailscale_ip(probe_source_ip) and tailscale_ip:
+        return tailscale_ip
+    if _is_lan_ip(lan_ip):
+        return lan_ip
+    if tailscale_ip:
+        return tailscale_ip
+    return probe_source_ip
+
+
+def _tailscale_peer_ips(self_ip: Optional[str]) -> list[str]:
+    if not self_ip:
+        return []
+    try:
+        result = subprocess.run(
+            ["tailscale", "status", "--json"],
+            capture_output=True, text=True, timeout=3
+        )
+        if result.returncode != 0:
+            return []
+        status = json.loads(result.stdout)
+    except Exception:
+        return []
+
+    peer_ips: list[str] = []
+    for peer in (status.get("Peer") or {}).values():
+        if not peer.get("Online"):
+            continue
+        for peer_ip in peer.get("TailscaleIPs") or []:
+            if _is_tailscale_ip(peer_ip) and peer_ip != self_ip and peer_ip not in peer_ips:
+                peer_ips.append(peer_ip)
+    return peer_ips
 
 
 def _batt_bar(pct: float, width: int = 8) -> str:
@@ -175,6 +227,12 @@ class SlotAssigner:
                 return entry[0]
             return None
 
+    def bind(self, ip: str, slot: int) -> None:
+        if slot < 0 or slot >= self._count():
+            return
+        with self._lock:
+            self._table[ip] = (slot, time.time())
+
 
 # ---------------------------------------------------------------------------
 # Receiver — data model + workers
@@ -244,6 +302,24 @@ class Receiver:
 
     # ------------------------------------------------------------------ workers
 
+    def _discovery_offer(self, client_ip: str, hostname: str) -> tuple[dict[str, object], int]:
+        slot_idx = self.assigner.get(client_ip)
+        slot = self.slots[slot_idx]
+        advertise_host = _advertise_host(client_ip, self.lan_ip, self.tailscale_ip)
+        offer = {
+            "service":     "project-o-stream",
+            "host":        advertise_host,
+            "hostname":    hostname,
+            "srtPort":     slot.srt_port,
+            "obsUdpPort":  slot.obs_port,
+            "transport":   _infer_transport(advertise_host),
+            "lanIp":       self.lan_ip if _is_lan_ip(self.lan_ip) else None,
+            "tailscaleIp": self.tailscale_ip,
+            "slotIndex":   slot_idx,
+            "totalSlots":  len(self.slots),
+        }
+        return offer, slot_idx
+
     def _discovery_worker(self) -> None:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -274,21 +350,9 @@ class Receiver:
                 continue
 
             if data == PROBE_BYTES:
-                slot_idx  = self.assigner.get(client_ip)
-                slot      = self.slots[slot_idx]
+                offer, slot_idx = self._discovery_offer(client_ip, hostname)
+                slot = self.slots[slot_idx]
                 transport = _infer_transport(client_ip)
-                offer = {
-                    "service":     "project-o-stream",
-                    "host":        self.tailscale_ip or self.lan_ip,
-                    "hostname":    hostname,
-                    "srtPort":     slot.srt_port,
-                    "obsUdpPort":  slot.obs_port,
-                    "transport":   transport,
-                    "lanIp":       self.lan_ip,
-                    "tailscaleIp": self.tailscale_ip,
-                    "slotIndex":   slot_idx,
-                    "totalSlots":  len(self.slots),
-                }
                 try:
                     sock.sendto(json.dumps(offer).encode(), addr)
                 except Exception:
@@ -311,6 +375,25 @@ class Receiver:
                     else:
                         self._log_msg(f"Slot {slot_idx + 1} assigned to {client_ip} (SRT :{slot.srt_port})")
 
+        sock.close()
+
+    def _tailnet_offer_worker(self) -> None:
+        if not self.tailscale_ip:
+            return
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        hostname = socket.gethostname()
+        self._log_msg(f"Tailscale backup offers on UDP {DISC_PUSH_PORT}")
+        while not self.stopping:
+            for peer_ip in _tailscale_peer_ips(self.tailscale_ip):
+                offer, _ = self._discovery_offer(peer_ip, hostname)
+                try:
+                    sock.sendto(json.dumps(offer).encode(), (peer_ip, DISC_PUSH_PORT))
+                except Exception:
+                    continue
+            for _ in range(10):
+                if self.stopping:
+                    break
+                time.sleep(0.1)
         sock.close()
 
     def _telemetry_worker(self) -> None:
@@ -341,7 +424,15 @@ class Receiver:
             if payload.get("service") != "project-o-stream-telemetry":
                 continue
 
-            slot_idx = self.assigner.lookup(client_ip)
+            slot_idx: Optional[int] = None
+            requested_slot = payload.get("slotIndex")
+            if isinstance(requested_slot, (int, float)) and not isinstance(requested_slot, bool):
+                requested_slot = int(requested_slot)
+                if 0 <= requested_slot < len(self.slots):
+                    slot_idx = requested_slot
+                    self.assigner.bind(client_ip, slot_idx)
+            if slot_idx is None:
+                slot_idx = self.assigner.lookup(client_ip)
             if slot_idx is None:
                 slot_idx = self.assigner.get(client_ip)
 
@@ -442,6 +533,7 @@ class Receiver:
 
         for target, name in [
             (self._discovery_worker, "discovery"),
+            (self._tailnet_offer_worker, "tailnet-offers"),
             (self._telemetry_worker, "telemetry"),
             (self._relay_worker,     "relay"),
         ]:
