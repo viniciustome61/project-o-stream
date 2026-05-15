@@ -209,6 +209,8 @@ class Receiver:
             grow_fn=self._grow_slot,
         )
 
+        self._selected = 0
+
         # FFmpeg
         self.ffmpeg_path = args.ffmpeg or "ffmpeg"
         self.ndi_available = False
@@ -283,6 +285,7 @@ class Receiver:
 
     def _build_cameras(self) -> Panel:
         tbl = Table(show_header=True, header_style="bold dim", box=None, padding=(0, 1))
+        tbl.add_column("", width=2)          # cursor
         tbl.add_column("", width=2)          # dot
         tbl.add_column("CAM",    width=4)
         tbl.add_column("DEVICE", width=20)
@@ -292,7 +295,12 @@ class Receiver:
         tbl.add_column("THERMAL", width=8)
         tbl.add_column("OBS INPUT", width=28)
 
+        sel = self._selected
         for s in self.slots:
+            selected = (s.index == sel)
+            row_style = "on grey23" if selected else ""
+            cursor = Text("▶" if selected else " ", style="bold cyan" if selected else "dim")
+
             # dot
             dot = Text("●", style="green bold") if s.connected else Text("○", style="dim")
 
@@ -350,7 +358,7 @@ class Receiver:
             if self.args.ndi and self.ndi_available:
                 obs_text.append(f"\nNDI: Project-O-Camera-{s.index + 1}", style="cyan dim")
 
-            tbl.add_row(dot, str(s.index + 1), dev, net, rtt, batt, thermal, obs_text)
+            tbl.add_row(cursor, dot, str(s.index + 1), dev, net, rtt, batt, thermal, obs_text, style=row_style)
 
         return Panel(tbl, title="[bold]Cameras[/bold]")
 
@@ -361,6 +369,12 @@ class Receiver:
         for ts, msg in entries:
             t.append(f"{ts} ", style="dim")
             t.append(f"{msg}\n", style="white")
+        hint = Text("\n↑↓ select  ", style="dim")
+        hint.append("k", style="bold cyan")
+        hint.append(" kill slot  ", style="dim")
+        hint.append("q", style="bold cyan")
+        hint.append(" quit", style="dim")
+        t.append_text(hint)
         return Panel(t, title="[bold]Log[/bold]")
 
     def _render(self) -> Columns:
@@ -542,6 +556,38 @@ class Receiver:
                     t.start()
             time.sleep(0.5)
 
+    # ------------------------------------------------------------------ keyboard
+
+    def _input_worker(self) -> None:
+        try:
+            import msvcrt
+        except ImportError:
+            return  # non-Windows
+        while not self.stopping:
+            if not msvcrt.kbhit():
+                time.sleep(0.05)
+                continue
+            ch = msvcrt.getwch()
+            if ch in ('\x00', '\xe0'):  # arrow key prefix
+                ch2 = msvcrt.getwch()
+                if ch2 == 'H':    # up
+                    self._selected = max(0, self._selected - 1)
+                elif ch2 == 'P':  # down
+                    self._selected = min(len(self.slots) - 1, self._selected + 1)
+            elif ch in ('k', 'K'):
+                if 0 <= self._selected < len(self.slots):
+                    slot = self.slots[self._selected]
+                    if slot.proc and slot.proc.poll() is None:
+                        try:
+                            slot.proc.kill()
+                            self._log_msg(f"Cam {slot.index + 1}: killed by user")
+                        except Exception as e:
+                            self._log_msg(f"Cam {slot.index + 1}: kill failed: {e}")
+                    else:
+                        self._log_msg(f"Cam {slot.index + 1}: not running")
+            elif ch in ('q', 'Q', '\x03'):  # q or Ctrl+C
+                self.stopping = True
+
     # ------------------------------------------------------------------ run
 
     def run(self) -> None:
@@ -555,6 +601,7 @@ class Receiver:
             threading.Thread(target=self._discovery_worker, daemon=True, name="discovery"),
             threading.Thread(target=self._telemetry_worker, daemon=True, name="telemetry"),
             threading.Thread(target=self._relay_worker,    daemon=True, name="relay"),
+            threading.Thread(target=self._input_worker,    daemon=True, name="input"),
         ]
         for t in threads:
             t.start()
