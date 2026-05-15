@@ -127,7 +127,7 @@ foreach ($slot in $slots) {
         Write-Host " OBS URL$label  : srt://0.0.0.0:$($slot.srtPort)?mode=listener&latency=$($latencyUs)&pkt_size=1316"
         Write-Host "                  [x] Restart playback when source becomes inactive"
     } else {
-        Write-Host " OBS Input$label: udp://127.0.0.1:$($slot.obsUdpPort)"
+        Write-Host " OBS Input${label}: udp://127.0.0.1:$($slot.obsUdpPort)"
     }
 }
 if (-not $NoDiscovery) {
