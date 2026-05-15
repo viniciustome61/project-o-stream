@@ -417,10 +417,10 @@ class _SenderScreenState extends State<SenderScreen> {
       }
 
       final primaryLabel =
-          receiver?.transportForHost(primaryConfig.host).toUpperCase() ??
+          receiver?.transportForHost(primaryConfig.host)?.toUpperCase() ??
               'PRIMARY';
       final fallbackLabel =
-          receiver?.transportForHost(fallbackHost).toUpperCase() ?? 'BACKUP';
+          receiver?.transportForHost(fallbackHost)?.toUpperCase() ?? 'BACKUP';
       _dbg(
         '$primaryLabel path ${primaryConfig.host} failed: $primaryError. '
         'Trying $fallbackLabel $fallbackHost.',

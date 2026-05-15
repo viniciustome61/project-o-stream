@@ -19,14 +19,15 @@ if ($tailscale) {
     } catch { $tailscaleIp = $null }
 }
 
-$lanIp = $null
+$script:lanIps = @()
 try {
-    $lanIp = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+    $script:lanIps = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
         Where-Object {
             $_.IPAddress -notmatch '^(127\.|169\.254\.|100\.)' -and
             $_.PrefixOrigin -in @('Dhcp', 'Manual')
-        } | Sort-Object PrefixLength -Descending | Select-Object -First 1).IPAddress
+        } | Sort-Object InterfaceMetric,PrefixLength | Select-Object -ExpandProperty IPAddress -Unique)
 } catch { }
+$lanIp = if ($script:lanIps.Count -gt 0) { [string]$script:lanIps[0] } else { $null }
 
 $udp = [System.Net.Sockets.UdpClient]::new($DiscoveryPort)
 $udp.EnableBroadcast = $true
@@ -88,24 +89,57 @@ function Get-SlotForPhone {
 
 function Get-TransportForHost {
     param([string]$HostIp)
-    if ($HostIp -match '^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.') {
+    if (Test-TailscaleIp -Ip $HostIp) {
         return "tailscale"
     }
-    if ($HostIp -match '^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)') {
+    if (Test-LanIp -Ip $HostIp) {
         return "lan"
     }
     return "srt"
 }
 
+function Test-TailscaleIp {
+    param([string]$Ip)
+    return $Ip -match '^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.'
+}
+
+function Test-LanIp {
+    param([string]$Ip)
+    return $Ip -match '^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)'
+}
+
+function Test-SameLanLayer {
+    param([string]$Left, [string]$Right)
+    if (-not (Test-LanIp -Ip $Left) -or -not (Test-LanIp -Ip $Right)) { return $false }
+    $leftParts = $Left.Split('.')
+    $rightParts = $Right.Split('.')
+    if ($leftParts.Count -ne 4 -or $rightParts.Count -ne 4) { return $false }
+    return ($leftParts[0] -eq $rightParts[0] -and
+            $leftParts[1] -eq $rightParts[1] -and
+            $leftParts[2] -eq $rightParts[2])
+}
+
+function Get-BestLanIpForClient {
+    param([string]$ClientIp)
+    foreach ($candidate in $script:lanIps) {
+        if (Test-SameLanLayer -Left $ClientIp -Right $candidate) { return $candidate }
+    }
+    if ($script:lanIps.Count -gt 0) { return [string]$script:lanIps[0] }
+    return $null
+}
+
 function New-DiscoveryPayload {
     param([string]$ProbeSourceIp)
     $slot = Get-SlotForPhone -PhoneIp $ProbeSourceIp
+    $lanAdvertiseHost = Get-BestLanIpForClient -ClientIp $ProbeSourceIp
 
     # Tailscale peers get Tailscale IP; LAN phones get LAN IP.
-    $advertiseHost = if ($tailscaleIp -and $ProbeSourceIp -match '^100\.') {
+    $advertiseHost = if ($tailscaleIp -and (Test-TailscaleIp -Ip $ProbeSourceIp)) {
         $tailscaleIp
-    } elseif ($lanIp) {
-        $lanIp
+    } elseif ((Test-LanIp -Ip $ProbeSourceIp) -and $lanAdvertiseHost) {
+        $lanAdvertiseHost
+    } elseif ($lanAdvertiseHost) {
+        $lanAdvertiseHost
     } elseif ($tailscaleIp) {
         $tailscaleIp
     } else {
@@ -116,7 +150,8 @@ function New-DiscoveryPayload {
         service             = "project-o-stream"
         version             = 1
         host                = $advertiseHost
-        lanIp               = $lanIp        # always included; client probes for LAN preference
+        lanIp               = $lanAdvertiseHost  # route-aware LAN/hotspot address for this client
+        lanIps              = $script:lanIps     # all local network layers, including hotspot/tether adapters
         tailscaleIp         = $tailscaleIp  # always included
         hostname            = $hostname
         srtPort             = [int]$slot.srtPort
@@ -152,7 +187,7 @@ function Send-OffersToPeers {
 $slotCount = $slots.Count
 Write-Host "Discovery listening on UDP 0.0.0.0:$DiscoveryPort ($slotCount slot$(if ($slotCount -gt 1) {'s'}))"
 Write-Host "Slot assignment: TTL ${slotTtlSeconds}s, LRU eviction when full"
-if ($lanIp)       { Write-Host "LAN IP       : $lanIp  (local phones + LAN-probe ACK)" }
+if ($lanIp)       { Write-Host "LAN IPs      : $($script:lanIps -join ', ')  (local/hotspot phones + LAN-probe ACK)" }
 if ($tailscaleIp) { Write-Host "Tailscale IP : $tailscaleIp  (Tailscale peers)" }
 if ($conflictUdp) { Write-Host "Conflict detection active on UDP $ClientDiscoveryPort" }
 
@@ -192,7 +227,8 @@ try {
                     $offer = $cfMsg | ConvertFrom-Json
                     if ($offer -and $offer.service -eq "project-o-stream" `
                             -and $tailscaleIp -and $offer.host `
-                            -and $offer.host -ne $tailscaleIp -and $offer.host -ne $lanIp) {
+                            -and $offer.host -ne $tailscaleIp `
+                            -and (@($script:lanIps) -notcontains [string]$offer.host)) {
                         if (((Get-Date) - $lastConflictWarning).TotalSeconds -ge 30) {
                             $peerName = if ($offer.hostname) { $offer.hostname } else { $conflictEndpoint.Address.ToString() }
                             Write-Host ""

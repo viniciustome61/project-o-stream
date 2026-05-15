@@ -41,7 +41,12 @@ LAN_ACK_BYTES   = b"PROJECTO_STREAM_LAN_ACK"
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _lan_ip() -> str:
+def _add_lan_candidate(candidates: list[str], ip: Optional[str]) -> None:
+    if _is_lan_ip(ip) and ip not in candidates:
+        candidates.append(ip or "")
+
+
+def _default_route_ip() -> Optional[str]:
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
@@ -49,7 +54,48 @@ def _lan_ip() -> str:
         s.close()
         return ip
     except Exception:
-        return "127.0.0.1"
+        return None
+
+
+def _windows_lan_ips() -> list[str]:
+    try:
+        result = subprocess.run(
+            [
+                "powershell", "-NoProfile", "-Command",
+                "Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | "
+                "Where-Object { $_.IPAddress -notmatch '^(127\\.|169\\.254\\.|100\\.)' "
+                "-and $_.PrefixOrigin -in @('Dhcp','Manual') } | "
+                "Sort-Object InterfaceMetric,PrefixLength | "
+                "Select-Object -ExpandProperty IPAddress",
+            ],
+            capture_output=True, text=True, timeout=3
+        )
+        if result.returncode != 0:
+            return []
+    except Exception:
+        return []
+    ips: list[str] = []
+    for line in result.stdout.splitlines():
+        _add_lan_candidate(ips, line.strip())
+    return ips
+
+
+def _lan_ips() -> list[str]:
+    ips: list[str] = []
+    _add_lan_candidate(ips, _default_route_ip())
+    for ip in _windows_lan_ips():
+        _add_lan_candidate(ips, ip)
+    try:
+        for result in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            _add_lan_candidate(ips, result[4][0])
+    except Exception:
+        pass
+    return ips
+
+
+def _lan_ip() -> str:
+    ips = _lan_ips()
+    return ips[0] if ips else "127.0.0.1"
 
 
 def _tailscale_ip() -> Optional[str]:
@@ -93,12 +139,33 @@ def _infer_transport(ip: str) -> str:
         return "lan"
 
 
-def _advertise_host(probe_source_ip: str, lan_ip: str, tailscale_ip: Optional[str]) -> str:
-    if _is_lan_ip(probe_source_ip) and _is_lan_ip(lan_ip):
+def _same_lan_layer(left: str, right: str) -> bool:
+    try:
+        left_addr = ipaddress.ip_address(left)
+        right_addr = ipaddress.ip_address(right)
+    except ValueError:
+        return False
+    if left_addr.version != 4 or right_addr.version != 4:
+        return False
+    if not _is_lan_ip(left) or not _is_lan_ip(right):
+        return False
+    return left.split(".")[:3] == right.split(".")[:3]
+
+
+def _best_lan_ip_for_client(client_ip: str, lan_ips: list[str]) -> Optional[str]:
+    for lan_ip in lan_ips:
+        if _same_lan_layer(client_ip, lan_ip):
+            return lan_ip
+    return lan_ips[0] if lan_ips else None
+
+
+def _advertise_host(probe_source_ip: str, lan_ips: list[str], tailscale_ip: Optional[str]) -> str:
+    lan_ip = _best_lan_ip_for_client(probe_source_ip, lan_ips)
+    if _is_lan_ip(probe_source_ip) and lan_ip:
         return lan_ip
     if _is_tailscale_ip(probe_source_ip) and tailscale_ip:
         return tailscale_ip
-    if _is_lan_ip(lan_ip):
+    if lan_ip:
         return lan_ip
     if tailscale_ip:
         return tailscale_ip
@@ -244,7 +311,8 @@ class Receiver:
         self.start_ts = time.time()
         self.stopping = False
 
-        self.lan_ip       = _lan_ip()
+        self.lan_ips      = _lan_ips()
+        self.lan_ip       = self.lan_ips[0] if self.lan_ips else _lan_ip()
         self.tailscale_ip = _tailscale_ip()
 
         self.slots: list[SlotState] = []
@@ -305,7 +373,8 @@ class Receiver:
     def _discovery_offer(self, client_ip: str, hostname: str) -> tuple[dict[str, object], int]:
         slot_idx = self.assigner.get(client_ip)
         slot = self.slots[slot_idx]
-        advertise_host = _advertise_host(client_ip, self.lan_ip, self.tailscale_ip)
+        lan_ip = _best_lan_ip_for_client(client_ip, self.lan_ips)
+        advertise_host = _advertise_host(client_ip, self.lan_ips, self.tailscale_ip)
         offer = {
             "service":     "project-o-stream",
             "host":        advertise_host,
@@ -313,7 +382,8 @@ class Receiver:
             "srtPort":     slot.srt_port,
             "obsUdpPort":  slot.obs_port,
             "transport":   _infer_transport(advertise_host),
-            "lanIp":       self.lan_ip if _is_lan_ip(self.lan_ip) else None,
+            "lanIp":       lan_ip,
+            "lanIps":      self.lan_ips,
             "tailscaleIp": self.tailscale_ip,
             "slotIndex":   slot_idx,
             "totalSlots":  len(self.slots),
@@ -716,10 +786,13 @@ class ReceiverApp(App[None]):
             "relay→OBS+NDI"  if (r.args.ndi and r.ndi_available) else
             "relay→OBS"
         )
+        lan_label = r.lan_ip
+        if len(r.lan_ips) > 1:
+            lan_label = f"{r.lan_ip} (+{len(r.lan_ips) - 1})"
         ts_part = f"  Tailscale {r.tailscale_ip}" if r.tailscale_ip else ""
         conn_indicator = "🟢" if connected else "○"
         self.sub_title = (
-            f"up {uptime}  LAN {r.lan_ip}{ts_part}  "
+            f"up {uptime}  LAN {lan_label}{ts_part}  "
             f"slots {len(r.slots)}  {mode}  "
             f"connected {conn_indicator} {connected}"
         )
