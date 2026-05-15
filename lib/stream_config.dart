@@ -56,6 +56,17 @@ const stable1080p30 = StreamProfile(
   recommendedLatencyMs: 100,
 );
 
+const stable1080p60 = StreamProfile(
+  name: '1080p60',
+  description: 'Smooth 60 fps on strong Wi-Fi',
+  width: 1080,
+  height: 1920,
+  fps: 60,
+  bitrate: 20 * 1000 * 1000,
+  audioBitrate: 128 * 1000,
+  recommendedLatencyMs: 100,
+);
+
 const balanced1440p30 = StreamProfile(
   name: '1440p30',
   description: 'Sharper stream without 4K bandwidth pressure',
@@ -92,6 +103,7 @@ const experimental4k60 = StreamProfile(
 const profiles = [
   battery720p30,
   stable1080p30,
+  stable1080p60,
   balanced1440p30,
   quality4k30,
   experimental4k60

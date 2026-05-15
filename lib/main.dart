@@ -51,11 +51,11 @@ class _SenderScreenState extends State<SenderScreen> {
   SenderConfig _config = const SenderConfig(
     host: '',
     port: 7070,
-    profile: quality4k30,
+    profile: stable1080p60,
     useHevc: false,
-    microphone: true,
+    microphone: false,
     lens: 'wide',
-    latencyMs: 80,
+    latencyMs: 100,
     autoReconnect: true,
     keepScreenOn: true,
   );
