@@ -84,11 +84,9 @@ final class CameraController: NSObject {
     }
 
     func startStream(config: [String: Any]) async throws {
-        if streaming {
-            await stopStream()
-        }
+        await stopStream()
 
-        let host = config["host"] as? String ?? ""
+        let host = (config["host"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let port = config["port"] as? Int ?? 7070
         let latencyMs = config["latencyMs"] as? Int ?? 80
         let microphone = config["microphone"] as? Bool ?? true
@@ -99,8 +97,11 @@ final class CameraController: NSObject {
             try await ensureAudioInputIfAllowed()
         }
 
-        guard !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        guard isUsableEndpointHost(host) else {
             throw StreamError.invalidArguments
+        }
+        if microphone {
+            try configureAudioSession()
         }
 
         let profile = config["profile"] as? [String: Any]
@@ -109,6 +110,11 @@ final class CameraController: NSObject {
         let bitrate = profile?["bitrate"] as? Int ?? 12_000_000
         let latency = latencyMs
 
+        let shouldRestorePreview = previewRunning || captureSession.isRunning
+        if shouldRestorePreview {
+            stopPreviewCaptureSession()
+        }
+
         let connection = SRTConnection()
         let stream = SRTStream(connection: connection)
         let mixer = MediaMixer()
@@ -116,51 +122,66 @@ final class CameraController: NSObject {
         self.stream = stream
         self.mixer = mixer
 
-        try await stream.setVideoSettings(VideoCodecSettings(
-            videoSize: CGSize(width: CGFloat(width), height: CGFloat(height)),
-            bitRate: bitrate,
-            profileLevel: kVTProfileLevel_H264_High_AutoLevel as String
-        ))
+        do {
+            try await stream.setVideoSettings(VideoCodecSettings(
+                videoSize: CGSize(width: CGFloat(width), height: CGFloat(height)),
+                bitRate: bitrate,
+                profileLevel: kVTProfileLevel_H264_High_AutoLevel as String
+            ))
 
-        try await mixer.attachVideo(activeVideoInput?.device ?? currentVideoDevice(), track: 0)
-        if microphone, let audioDevice = activeAudioInput?.device ?? AVCaptureDevice.default(for: .audio) {
-            try await mixer.attachAudio(audioDevice, track: 0)
-        }
-        await mixer.addOutput(stream)
+            try await mixer.attachVideo(activeVideoInput?.device ?? currentVideoDevice(), track: 0)
+            if microphone, let audioDevice = activeAudioInput?.device ?? AVCaptureDevice.default(for: .audio) {
+                try await mixer.attachAudio(audioDevice, track: 0)
+            }
+            await mixer.addOutput(stream)
+            print("[PO] starting MediaMixer capture")
+            await mixer.startRunning()
 
-        let urlString = "srt://\(host):\(port)?mode=caller&latency=\(latency)&tlpktdrop=1"
-        guard let url = URL(string: urlString) else {
-            throw StreamError.invalidArguments
+            let urlString = "srt://\(host):\(port)?mode=caller&latency=\(latency)&tlpktdrop=1"
+            guard let url = URL(string: urlString) else {
+                throw StreamError.invalidArguments
+            }
+            print("[PO] connecting SRT: \(urlString)")
+            try await connection.connect(url)
+            await stream.publish()
+            streaming = true
+            print("[PO] stream live")
+        } catch {
+            print("[PO] startStream() failed: \(error)")
+            await stopStream()
+            if shouldRestorePreview {
+                try? await startPreview()
+            }
+            throw error
         }
-        print("[PO] connecting SRT: \(urlString)")
-        try await connection.connect(url)
-        await stream.publish()
-        streaming = true
     }
 
-    func stopStream() async {
+    func stopStream(restartPreview: Bool = false) async {
+        let activeMixer = mixer
         let activeStream = stream
         let activeConnection = connection
         stream = nil
         connection = nil
         mixer = nil
         streaming = false
+        if let activeMixer {
+            if let activeStream {
+                await activeMixer.removeOutput(activeStream)
+            }
+            await activeMixer.stopRunning()
+        }
         await activeStream?.close()
         await activeConnection?.close()
+        if restartPreview {
+            try? await startPreview()
+        }
     }
 
     func stop() {
         Task {
             await stopStream()
         }
-        previewRunning = false
-        let session = captureSession
-        captureQueue.async {
-            if session.isRunning {
-                print("[PO] captureSession.stopRunning()")
-                session.stopRunning()
-            }
-        }
+        stopPreviewCaptureSession()
     }
 
     func switchCamera() async throws {
@@ -241,12 +262,39 @@ final class CameraController: NSObject {
         captureSession.commitConfiguration()
     }
 
+    private func configureAudioSession() throws {
+        let session = AVAudioSession.sharedInstance()
+        try session.setCategory(.playAndRecord, mode: .videoRecording, options: [.defaultToSpeaker, .allowBluetooth])
+        try session.setActive(true)
+    }
+
+    private func stopPreviewCaptureSession() {
+        previewRunning = false
+        let session = captureSession
+        captureQueue.sync {
+            if session.isRunning {
+                print("[PO] captureSession.stopRunning()")
+                session.stopRunning()
+            }
+        }
+    }
+
     private func currentVideoDevice() -> AVCaptureDevice {
         if let device = activeVideoInput?.device {
             return device
         }
         return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: cameraPosition)
             ?? AVCaptureDevice.default(for: .video)!
+    }
+
+    private func isUsableEndpointHost(_ host: String) -> Bool {
+        guard !host.isEmpty,
+              host != "0.0.0.0",
+              host != "255.255.255.255",
+              let firstOctet = Int(host.split(separator: ".").first ?? "") else {
+            return false
+        }
+        return firstOctet > 0 && firstOctet < 224 && firstOctet != 127
     }
 }
 

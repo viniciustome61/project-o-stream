@@ -233,11 +233,12 @@ class AppDelegate: FlutterAppDelegate, FlutterStreamHandler {
                     guard let args = call.arguments as? [String: Any] else {
                         throw StreamError.invalidArguments
                     }
+                    send(status: "Connecting", live: false)
                     try await nativeCamera().startStream(config: args)
                     send(status: "Live", live: true)
                     result(nil)
                 case "stopStream":
-                    await camera?.stopStream()
+                    await camera?.stopStream(restartPreview: true)
                     send(status: "Ready", live: false)
                     result(nil)
                 case "switchCamera":
