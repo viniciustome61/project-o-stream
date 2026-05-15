@@ -1,7 +1,10 @@
 package com.projecto.stream
 
 import android.Manifest
+import android.content.Context
 import android.content.pm.PackageManager
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
 import android.media.AudioFormat
 import android.os.Build
 import android.util.Size
@@ -23,6 +26,7 @@ import io.github.thibaultbee.streampack.core.streamers.single.AudioConfig
 import io.github.thibaultbee.streampack.core.streamers.single.SingleStreamer
 import io.github.thibaultbee.streampack.core.streamers.single.VideoConfig
 import io.github.thibaultbee.streampack.core.streamers.single.cameraSingleStreamer
+import io.github.thibaultbee.streampack.core.streamers.single.setCameraId
 import io.github.thibaultbee.streampack.ui.views.PreviewView
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -81,6 +85,7 @@ class MainActivity : FlutterActivity() {
             "startStream" -> bridge.startStream(call.arguments as Map<*, *>).let { null }
             "stopStream" -> bridge.stopStream().let { null }
             "switchCamera" -> bridge.switchCamera().let { null }
+            "setLens" -> bridge.setLens((call.arguments as Map<*, *>)["lens"].toString()).let { null }
             "setTorch" -> bridge.setTorch((call.arguments as Map<*, *>)["enabled"] == true).let { null }
             "setZoom" -> bridge.setZoom(((call.arguments as Map<*, *>)["value"] as Number).toFloat()).let { null }
             "setKeepScreenOn" -> bridge.setKeepScreenOn((call.arguments as Map<*, *>)["enabled"] == true).let { null }
@@ -114,11 +119,19 @@ class StreamBridge(
     val previewView = PreviewView(activity)
     private var streamer: SingleStreamer? = null
     private var live = false
+    private var selectedLens = "wide"
+    private var selectedCameraId: String? = null
 
     suspend fun initialize() {
-        val activeStreamer = streamer ?: cameraSingleStreamer(context = activity).also {
+        val cameraId = selectedCameraId ?: cameraIdForLens(selectedLens)
+        val activeStreamer = streamer ?: (if (cameraId != null) {
+            cameraSingleStreamer(context = activity, cameraId = cameraId)
+        } else {
+            cameraSingleStreamer(context = activity)
+        }).also {
             streamer = it
         }
+        selectedCameraId = cameraId
         activeStreamer.setTargetRotation(Surface.ROTATION_0)
         previewView.setVideoSourceProvider(activeStreamer)
         emitStatus("Ready", false)
@@ -160,6 +173,7 @@ class StreamBridge(
             "torch" to true,
             "zoom" to true,
             "transportStatus" to "SRT sender available via StreamPack",
+            "lenses" to availableLenses(),
             "device" to "${Build.MANUFACTURER} ${Build.MODEL}",
             "os" to "Android ${Build.VERSION.RELEASE}"
         )
@@ -214,7 +228,24 @@ class StreamBridge(
     }
 
     suspend fun switchCamera() {
-        emitStatus("Camera switch unavailable in this build", live)
+        val lenses = availableLenses().mapNotNull { it["id"] as? String }
+        if (lenses.isEmpty()) {
+            error("No switchable camera lens is available on this Android device.")
+        }
+        val current = lenses.indexOf(selectedLens).takeIf { it >= 0 } ?: 0
+        setLens(lenses[(current + 1) % lenses.size])
+    }
+
+    suspend fun setLens(lens: String) {
+        val normalized = normalizeLens(lens)
+        val cameraId = cameraIdForLens(normalized)
+            ?: error("The $normalized lens is not available on this Android device.")
+        val activeStreamer = requireStreamer()
+        activeStreamer.setCameraId(cameraId)
+        selectedLens = normalized
+        selectedCameraId = cameraId
+        previewView.setVideoSourceProvider(activeStreamer)
+        emitStatus("Lens ${lensLabel(normalized)}", live)
     }
 
     suspend fun setTorch(enabled: Boolean) {
@@ -239,6 +270,46 @@ class StreamBridge(
             initialize()
         }
         return streamer ?: error("Camera streamer unavailable")
+    }
+
+    private fun cameraManager(): CameraManager =
+        activity.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+
+    private fun cameraIdForLens(lens: String): String? {
+        val facing = when (normalizeLens(lens)) {
+            "front" -> CameraCharacteristics.LENS_FACING_FRONT
+            else -> CameraCharacteristics.LENS_FACING_BACK
+        }
+        return cameraManager().cameraIdList.firstOrNull { cameraId ->
+            cameraManager()
+                .getCameraCharacteristics(cameraId)
+                .get(CameraCharacteristics.LENS_FACING) == facing
+        }
+    }
+
+    private fun availableLenses(): List<Map<String, String>> {
+        val lenses = mutableListOf<Map<String, String>>()
+        if (cameraIdForLens("wide") != null) {
+            lenses += mapOf("id" to "wide", "label" to "Wide")
+        }
+        if (cameraIdForLens("front") != null) {
+            lenses += mapOf("id" to "front", "label" to "Front")
+        }
+        return lenses
+    }
+
+    private fun normalizeLens(lens: String): String {
+        return when (lens.trim().lowercase()) {
+            "front", "selfie" -> "front"
+            else -> "wide"
+        }
+    }
+
+    private fun lensLabel(lens: String): String {
+        return when (normalizeLens(lens)) {
+            "front" -> "Front"
+            else -> "Wide"
+        }
     }
 
     private fun emitStatus(status: String, live: Boolean) {
