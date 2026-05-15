@@ -10,21 +10,57 @@ class DiscoveredReceiver {
     required this.obsUdpPort,
     required this.transport,
     required this.roundTripMs,
+    String? preferredHost,
+    String? preferredTransport,
+    this.fallbackHost,
+    this.fallbackTransport,
     this.slotIndex = 0,
     this.totalSlots = 1,
-  });
+  })  : preferredHost = preferredHost ?? host,
+        preferredTransport = preferredTransport ?? transport;
 
   final String host;
+  final String preferredHost;
   final String hostname;
   final int srtPort;
   final int obsUdpPort;
   final String transport;
+  final String preferredTransport;
+  final String? fallbackHost;
+  final String? fallbackTransport;
   final int roundTripMs;
   final int slotIndex;
   final int totalSlots;
 
   String get label => '$hostname  $host:$srtPort  ${roundTripMs}ms';
   String get details => transport.toUpperCase();
+  bool get hasFallback =>
+      fallbackHost != null && fallbackHost!.trim() != preferredHost.trim();
+
+  String transportForHost(String endpoint) {
+    final host = endpoint.trim();
+    if (host == preferredHost) return preferredTransport;
+    if (host == fallbackHost) return fallbackTransport ?? transport;
+    if (host == this.host) return transport;
+    return transport;
+  }
+
+  DiscoveredReceiver withActiveHost(String activeHost) {
+    return DiscoveredReceiver(
+      host: activeHost,
+      preferredHost: preferredHost,
+      hostname: hostname,
+      srtPort: srtPort,
+      obsUdpPort: obsUdpPort,
+      transport: transportForHost(activeHost),
+      preferredTransport: preferredTransport,
+      fallbackHost: fallbackHost,
+      fallbackTransport: fallbackTransport,
+      roundTripMs: roundTripMs,
+      slotIndex: slotIndex,
+      totalSlots: totalSlots,
+    );
+  }
 }
 
 class ReceiverDiscovery {
@@ -55,29 +91,22 @@ class ReceiverDiscovery {
             jsonDecode(utf8.decode(datagram.data)) as Map<String, dynamic>;
         if (payload['service'] != 'project-o-stream') return;
 
-        final payloadHost = (payload['host'] as String?)?.trim();
-        final datagramHost = datagram.address.address;
-        String host =
-            _isUsableEndpointHost(payloadHost) ? payloadHost! : datagramHost;
-        if (!_isUsableEndpointHost(host)) return;
+        final endpoint = await _selectEndpoint(payload, datagram);
+        if (endpoint == null) return;
 
-        // If the server advertises a separate LAN IP, do a quick reachability
-        // probe. If it responds, use LAN for SRT (lower latency than Tailscale).
-        final lanIpStr = (payload['lanIp'] as String?)?.trim();
-        if (_isUsableEndpointHost(lanIpStr) && lanIpStr != host) {
-          final lanReachable = await _probeLan(lanIpStr!);
-          if (lanReachable) host = lanIpStr;
-        }
-
-        if (!seen.add(host) || completer.isCompleted) return;
+        if (!seen.add(endpoint.host) || completer.isCompleted) return;
         final elapsed = DateTime.now().difference(started).inMilliseconds;
         completer.complete(
           DiscoveredReceiver(
-            host: host,
-            hostname: (payload['hostname'] as String?) ?? host,
+            host: endpoint.host,
+            preferredHost: endpoint.host,
+            hostname: (payload['hostname'] as String?) ?? endpoint.host,
             srtPort: (payload['srtPort'] as num?)?.toInt() ?? 7070,
             obsUdpPort: (payload['obsUdpPort'] as num?)?.toInt() ?? 15000,
-            transport: (payload['transport'] as String?) ?? 'srt',
+            transport: endpoint.transport,
+            preferredTransport: endpoint.transport,
+            fallbackHost: endpoint.fallbackHost,
+            fallbackTransport: endpoint.fallbackTransport,
             roundTripMs: elapsed,
             slotIndex: (payload['slotIndex'] as num?)?.toInt() ?? 0,
             totalSlots: (payload['totalSlots'] as num?)?.toInt() ?? 1,
@@ -157,6 +186,95 @@ class ReceiverDiscovery {
       socket.close();
     }
     return result;
+  }
+
+  static Future<_EndpointSelection?> _selectEndpoint(
+    Map<String, dynamic> payload,
+    Datagram datagram,
+  ) async {
+    final payloadHost = (payload['host'] as String?)?.trim();
+    final datagramHost = datagram.address.address;
+    final lanIp = (payload['lanIp'] as String?)?.trim();
+    final lanIps = payload['lanIps'];
+    final tailscaleIp = (payload['tailscaleIp'] as String?)?.trim();
+
+    final lanCandidates = <String>[];
+    final tailscaleCandidates = <String>[];
+
+    void addLan(String? value) {
+      final host = value?.trim();
+      if (_isLanEndpointHost(host) && !lanCandidates.contains(host)) {
+        lanCandidates.add(host!);
+      }
+    }
+
+    void addTailscale(String? value) {
+      final host = value?.trim();
+      if (_isTailscaleEndpointHost(host) &&
+          !tailscaleCandidates.contains(host)) {
+        tailscaleCandidates.add(host!);
+      }
+    }
+
+    addLan(datagramHost);
+    addLan(lanIp);
+    if (lanIps is List) {
+      for (final candidate in lanIps) {
+        addLan(candidate?.toString());
+      }
+    }
+    addLan(payloadHost);
+
+    addTailscale(tailscaleIp);
+    addTailscale(payloadHost);
+    addTailscale(datagramHost);
+
+    for (final candidate in lanCandidates) {
+      final reachedOverLan = candidate == datagramHost ||
+          await _probeLan(candidate, timeout: const Duration(milliseconds: 450));
+      if (reachedOverLan) {
+        final fallback = _firstCandidate(tailscaleCandidates);
+        return _EndpointSelection(
+          host: candidate,
+          transport: 'lan',
+          fallbackHost: fallback,
+          fallbackTransport: fallback == null ? null : 'tailscale',
+        );
+      }
+    }
+
+    final tailscaleHost = _firstCandidate(tailscaleCandidates);
+    if (tailscaleHost != null) {
+      return _EndpointSelection(
+        host: tailscaleHost,
+        transport: 'tailscale',
+      );
+    }
+
+    final directHost = _firstUsableHost([payloadHost, datagramHost]);
+    if (directHost == null) return null;
+    return _EndpointSelection(
+      host: directHost,
+      transport: _transportForHost(directHost),
+    );
+  }
+
+  static String? _firstCandidate(List<String> values) {
+    return values.isEmpty ? null : values.first;
+  }
+
+  static String? _firstUsableHost(Iterable<String?> values) {
+    for (final value in values) {
+      final host = value?.trim();
+      if (_isUsableEndpointHost(host)) return host;
+    }
+    return null;
+  }
+
+  static String _transportForHost(String host) {
+    if (_isTailscaleEndpointHost(host)) return 'tailscale';
+    if (_isLanEndpointHost(host)) return 'lan';
+    return 'srt';
   }
 
   // Sends PROJECTO_STREAM_LAN_PROBE to the server's LAN IP and waits for ACK.
@@ -252,6 +370,21 @@ class ReceiverDiscovery {
         !linkLocal;
   }
 
+  static bool _isLanEndpointHost(String? value) {
+    if (!_isUsableEndpointHost(value)) return false;
+    return _shouldScanSubnet(value!.trim());
+  }
+
+  static bool _isTailscaleEndpointHost(String? value) {
+    if (!_isUsableEndpointHost(value)) return false;
+    final address = InternetAddress.tryParse(value!.trim());
+    if (address == null || address.type != InternetAddressType.IPv4) {
+      return false;
+    }
+    final octets = address.address.split('.').map(int.parse).toList();
+    return octets[0] == 100 && octets[1] >= 64 && octets[1] <= 127;
+  }
+
   static bool _shouldScanSubnet(String value) {
     final address = InternetAddress.tryParse(value);
     if (address == null || address.type != InternetAddressType.IPv4) {
@@ -264,4 +397,18 @@ class ReceiverDiscovery {
         (first == 172 && second >= 16 && second <= 31) ||
         (first == 192 && second == 168);
   }
+}
+
+class _EndpointSelection {
+  const _EndpointSelection({
+    required this.host,
+    required this.transport,
+    this.fallbackHost,
+    this.fallbackTransport,
+  });
+
+  final String host;
+  final String transport;
+  final String? fallbackHost;
+  final String? fallbackTransport;
 }
