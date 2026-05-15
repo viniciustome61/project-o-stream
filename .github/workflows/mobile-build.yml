@@ -38,6 +38,8 @@ jobs:
       - name: Build iOS device app (release, unsigned)
         run: |
           set -o pipefail
+          flutter build ios --release --no-codesign --verbose 2>&1 | tail -80
+
           cd ios
           xcodebuild -workspace Runner.xcworkspace \
             -scheme Runner \
@@ -51,7 +53,7 @@ jobs:
             DEVELOPMENT_TEAM="" \
             PROVISIONING_PROFILE_SPECIFIER="" \
             ONLY_ACTIVE_ARCH=NO \
-            2>&1 | tail -150
+            2>&1 | tail -100
 
       - name: Package unsigned release IPA
         run: |
