@@ -78,4 +78,10 @@ class NativeStreamer {
   static Future<void> setKeepScreenOn(bool enabled) async {
     await _methods.invokeMethod<void>('setKeepScreenOn', {'enabled': enabled});
   }
+
+  static Future<Map<String, Object?>> getDeviceTelemetry() async {
+    final result =
+        await _methods.invokeMapMethod<String, Object?>('getDeviceTelemetry');
+    return result ?? const {};
+  }
 }

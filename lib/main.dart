@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 
 import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
@@ -70,6 +72,8 @@ class _SenderScreenState extends State<SenderScreen> {
   Map<String, Object?> _capabilities = const {};
   DiscoveredReceiver? _receiver;
   Timer? _autoConnectTimer;
+  Timer? _telemetryTimer;
+  static const int _telemetryPort = 7075;
   bool _previewStarted = false;
   bool _useNativePreview = true;
   final Completer<void> _firstFrameReady = Completer<void>();
@@ -115,6 +119,7 @@ class _SenderScreenState extends State<SenderScreen> {
   @override
   void dispose() {
     HardwareKeyboard.instance.removeHandler(_handleVolumeKey);
+    _telemetryTimer?.cancel();
     _autoConnectTimer?.cancel();
     _events?.cancel();
     super.dispose();
@@ -245,6 +250,7 @@ class _SenderScreenState extends State<SenderScreen> {
       return;
     }
     _receiver = found;
+    _startTelemetry();
     _dbg('Receiver found: ${found.label}');
     await _saveHost(found.host, found.srtPort);
     if (!mounted) return;
@@ -351,6 +357,35 @@ class _SenderScreenState extends State<SenderScreen> {
     } on TimeoutException {
       _dbg('first Flutter frame wait timed out; continuing auto-connect');
     }
+  }
+
+  void _startTelemetry() {
+    _telemetryTimer?.cancel();
+    _telemetryTimer = Timer.periodic(
+      const Duration(seconds: 5),
+      (_) => unawaited(_sendTelemetry()),
+    );
+    unawaited(_sendTelemetry());
+  }
+
+  Future<void> _sendTelemetry() async {
+    final host = _receiver?.host;
+    if (host == null || !ReceiverDiscovery.isUsableEndpointHost(host)) return;
+    try {
+      final info = await NativeStreamer.getDeviceTelemetry();
+      final payload = utf8.encode(jsonEncode({
+        'service': 'project-o-stream-telemetry',
+        'hostname': info['hostname'] ?? '',
+        'battery': info['battery'] ?? -1,
+        'charging': info['charging'] ?? false,
+        'thermalState': info['thermalState'] ?? 'nominal',
+        'rttMs': _receiver?.roundTripMs ?? 0,
+        'transport': _receiver?.transport ?? '',
+      }));
+      final socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
+      socket.send(payload, InternetAddress(host), _telemetryPort);
+      socket.close();
+    } catch (_) {}
   }
 
   Future<void> _ensureLive() async {
