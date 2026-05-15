@@ -23,7 +23,7 @@ if (-not $python) {
 # ---- textual ---------------------------------------------------------------
 $checkTextual = & python -c "import textual" 2>&1
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "[launcher] textual not installed — installing…"
+    Write-Host "[launcher] textual not installed - installing..."
     & python -m pip install textual --quiet
     if ($LASTEXITCODE -ne 0) {
         Write-Error "Failed to install textual. Run: pip install textual"
@@ -50,5 +50,5 @@ if ($DirectToObs) { $pyArgs += "--direct-to-obs" }
 if ($Ndi)         { $pyArgs += "--ndi" }
 
 # ---- launch ----------------------------------------------------------------
-Write-Host "[launcher] Starting receiver (Textual TUI)…"
+Write-Host "[launcher] Starting receiver (Textual TUI)..."
 & python @pyArgs
