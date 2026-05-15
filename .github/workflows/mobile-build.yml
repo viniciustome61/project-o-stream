@@ -37,11 +37,6 @@ jobs:
 
       - name: Build iOS device app (release, unsigned)
         run: |
-          # Inject signing overrides through the xcconfig chain so flutter build
-          # does not gate on a missing Development Team even with --no-codesign.
-          printf '\nCODE_SIGNING_ALLOWED=NO\nCODE_SIGNING_REQUIRED=NO\nCODE_SIGN_IDENTITY=\nDEVELOPMENT_TEAM=\n' \
-            >> ios/Flutter/Release.xcconfig
-
           set -o pipefail
           flutter build ios --release --no-codesign --verbose 2>&1 | tail -80
 
