@@ -369,23 +369,42 @@ class Receiver:
         if self.args.ndi and self.ndi_available:
             ndi_name = f"Project-O-Camera-{slot.index + 1}"
             cmd += ["-map", "0", "-vf", "format=uyvy422", "-c:a", "pcm_s16le", "-f", "libndi_newtek", ndi_name]
-        return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
     def _relay_worker_slot(self, slot: SlotState) -> None:
         ndi_note = f" + NDI: Project-O-Camera-{slot.index + 1}" if (self.args.ndi and self.ndi_available) else ""
-        self._log_msg(f"Cam {slot.index + 1}: waiting on SRT :{slot.srt_port} → UDP :{slot.obs_port}{ndi_note}")
+        self._log_msg(f"Cam {slot.index + 1}: waiting on SRT :{slot.srt_port} -> UDP :{slot.obs_port}{ndi_note}")
+        backoff = 1.0
         while not self.stopping:
             try:
+                t0 = time.time()
                 slot.proc = self._start_ffmpeg(slot)
                 slot.proc.wait()
                 if self.stopping:
                     break
-                code = slot.proc.returncode
-                self._log_msg(f"Cam {slot.index + 1}: FFmpeg exited ({code}), restarting…")
-                time.sleep(1)
+                elapsed = time.time() - t0
+                code    = slot.proc.returncode
+                # grab last stderr line for context
+                stderr_tail = ""
+                if slot.proc.stderr:
+                    raw = slot.proc.stderr.read().decode("utf-8", errors="replace").strip()
+                    last = [l.strip() for l in raw.splitlines() if l.strip()]
+                    if last:
+                        stderr_tail = f": {last[-1][:120]}"
+                if elapsed < 3.0:
+                    # fast exit = startup failure; back off to avoid log flood
+                    backoff = min(backoff * 2, 30.0)
+                    self._log_msg(
+                        f"Cam {slot.index + 1}: FFmpeg failed ({code}){stderr_tail} - retry in {backoff:.0f}s"
+                    )
+                else:
+                    backoff = 1.0
+                    self._log_msg(f"Cam {slot.index + 1}: FFmpeg exited ({code}), restarting...")
+                time.sleep(backoff)
             except Exception as e:
                 self._log_msg(f"Cam {slot.index + 1}: relay error: {e}")
-                time.sleep(2)
+                backoff = min(backoff * 2, 30.0)
+                time.sleep(backoff)
 
     def _relay_worker(self) -> None:
         if self.args.direct_to_obs:
