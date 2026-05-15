@@ -31,6 +31,7 @@ from textual.widgets import DataTable, Footer, Header, RichLog
 DISC_PORT       = 7071
 DISC_PUSH_PORT  = 7072
 TELE_PORT       = 7075
+CONTROL_PORT    = 7076
 SLOT_TTL        = 120
 TELE_FRESH      = 20
 PROBE_BYTES     = b"PROJECTO_STREAM_DISCOVER"
@@ -64,7 +65,7 @@ def _windows_lan_ips() -> list[str]:
                 "powershell", "-NoProfile", "-Command",
                 "Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | "
                 "Where-Object { $_.IPAddress -notmatch '^(127\\.|169\\.254\\.|100\\.)' "
-                "-and $_.PrefixOrigin -in @('Dhcp','Manual') } | "
+                "} | "
                 "Sort-Object InterfaceMetric,PrefixLength | "
                 "Select-Object -ExpandProperty IPAddress",
             ],
@@ -241,6 +242,8 @@ class SlotState:
         self.obs_port = obs_port
         self.ip: Optional[str] = None
         self.hostname:  Optional[str]   = None
+        self.lens:      Optional[str]   = None
+        self.control_port: int          = CONTROL_PORT
         self.battery:   Optional[float] = None
         self.charging:  bool            = False
         self.thermal:   Optional[str]   = None
@@ -510,6 +513,12 @@ class Receiver:
             slot.ip         = client_ip
             slot.transport  = payload.get("transport") or _infer_transport(client_ip)
             slot.hostname   = payload.get("hostname") or slot.hostname
+            slot.lens       = payload.get("lens") or slot.lens
+            control_port    = payload.get("controlPort")
+            if isinstance(control_port, (int, float)) and not isinstance(control_port, bool):
+                control_port = int(control_port)
+                if 1 <= control_port <= 65535:
+                    slot.control_port = control_port
             slot.battery    = payload.get("battery",     slot.battery)
             slot.charging   = bool(payload.get("charging", slot.charging))
             slot.thermal    = payload.get("thermalState", slot.thermal)
@@ -630,6 +639,28 @@ class Receiver:
                         pass
         sys.exit(0)
 
+    def send_control(self, slot: SlotState, action: str) -> bool:
+        if not slot.ip:
+            self._log_msg(f"Cam {slot.index + 1}: no phone address for remote control")
+            return False
+        payload = json.dumps({
+            "service": "project-o-stream-control",
+            "action": action,
+            "slotIndex": slot.index,
+            "sentAt": time.time(),
+        }).encode("utf-8")
+        target = (slot.ip, slot.control_port or CONTROL_PORT)
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                for _ in range(3):
+                    sock.sendto(payload, target)
+                    time.sleep(0.04)
+            self._log_msg(f"Cam {slot.index + 1}: remote {action} sent to {target[0]}:{target[1]}")
+            return True
+        except Exception as e:
+            self._log_msg(f"Cam {slot.index + 1}: remote {action} failed: {e}")
+            return False
+
 
 # ---------------------------------------------------------------------------
 # Textual TUI
@@ -661,6 +692,7 @@ class ReceiverApp(App[None]):
     }
     """
     BINDINGS = [
+        Binding("l",      "cycle_lens", "Cycle lens", show=True),
         Binding("k",      "kill_slot", "Kill slot", show=True),
         Binding("q",      "quit_app",  "Quit",      show=True),
         Binding("ctrl+c", "quit_app",  "Quit",      show=False),
@@ -804,12 +836,27 @@ class ReceiverApp(App[None]):
 
     # ------------------------------------------------------------------ actions
 
-    def action_kill_slot(self) -> None:
-        table   = self.query_one(DataTable)
+    def _selected_slot(self) -> Optional[SlotState]:
+        table = self.query_one(DataTable)
         row_idx = table.cursor_row
-        slots   = self._receiver.slots
+        slots = self._receiver.slots
         if 0 <= row_idx < len(slots):
-            slot = slots[row_idx]
+            return slots[row_idx]
+        return None
+
+    def action_cycle_lens(self) -> None:
+        slot = self._selected_slot()
+        if slot is None:
+            self._receiver._log_msg("Cycle lens: no camera row selected")
+            return
+        if not slot.connected:
+            self._receiver._log_msg(f"Cam {slot.index + 1}: phone is not connected")
+            return
+        self._receiver.send_control(slot, "cycleLens")
+
+    def action_kill_slot(self) -> None:
+        slot = self._selected_slot()
+        if slot is not None:
             if slot.proc and slot.proc.poll() is None:
                 try:
                     slot.proc.kill()

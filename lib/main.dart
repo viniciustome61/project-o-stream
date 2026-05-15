@@ -73,13 +73,14 @@ class _SenderScreenState extends State<SenderScreen> {
   DiscoveredReceiver? _receiver;
   Timer? _autoConnectTimer;
   Timer? _telemetryTimer;
+  RawDatagramSocket? _controlSocket;
+  StreamSubscription<RawSocketEvent>? _controlSubscription;
   static const int _telemetryPort = 7075;
+  static const int _controlPort = 7076;
   bool _previewStarted = false;
   bool _useNativePreview = true;
   final Completer<void> _firstFrameReady = Completer<void>();
-  static const _minAutoReconnectDelay = Duration(seconds: 2);
-  static const _maxAutoReconnectDelay = Duration(seconds: 15);
-  Duration _autoReconnectDelay = _minAutoReconnectDelay;
+  static const _autoReconnectDelay = Duration(seconds: 3);
 
   // ── interface lock ─────────────────────────────────────────────
   bool _locked = false;
@@ -113,6 +114,7 @@ class _SenderScreenState extends State<SenderScreen> {
     });
     _events = NativeStreamer.events.listen(_handleNativeEvent);
     HardwareKeyboard.instance.addHandler(_handleVolumeKey);
+    unawaited(_startControlListener());
     _boot();
   }
 
@@ -121,6 +123,8 @@ class _SenderScreenState extends State<SenderScreen> {
     HardwareKeyboard.instance.removeHandler(_handleVolumeKey);
     _telemetryTimer?.cancel();
     _autoConnectTimer?.cancel();
+    _controlSubscription?.cancel();
+    _controlSocket?.close();
     _events?.cancel();
     super.dispose();
   }
@@ -186,7 +190,7 @@ class _SenderScreenState extends State<SenderScreen> {
         _status = _receiver == null ? 'Searching receiver' : 'Receiver ready';
       });
       if (_config.autoReconnect) {
-        _scheduleAutoConnect(const Duration(seconds: 2));
+        _scheduleAutoConnect();
       }
       _dbg('boot complete. status=$_status');
     } catch (error) {
@@ -281,8 +285,8 @@ class _SenderScreenState extends State<SenderScreen> {
     }
   }
 
-  void _scheduleAutoConnect([Duration? delay]) {
-    final retryDelay = delay ?? _autoReconnectDelay;
+  void _scheduleAutoConnect() {
+    const retryDelay = _autoReconnectDelay;
     _autoConnectTimer?.cancel();
     _dbg('Auto reconnect in ${retryDelay.inSeconds}s');
     _autoConnectTimer = Timer(retryDelay, () {
@@ -291,19 +295,7 @@ class _SenderScreenState extends State<SenderScreen> {
     });
   }
 
-  void _resetAutoReconnectDelay() {
-    _autoReconnectDelay = _minAutoReconnectDelay;
-  }
-
-  void _increaseAutoReconnectDelay() {
-    final nextSeconds = (_autoReconnectDelay.inSeconds * 2)
-        .clamp(
-          _minAutoReconnectDelay.inSeconds,
-          _maxAutoReconnectDelay.inSeconds,
-        )
-        .toInt();
-    _autoReconnectDelay = Duration(seconds: nextSeconds);
-  }
+  void _resetAutoReconnectDelay() {}
 
   List<String> get _availableLensIds {
     final raw = _capabilities['lenses'];
@@ -368,6 +360,68 @@ class _SenderScreenState extends State<SenderScreen> {
     unawaited(_sendTelemetry());
   }
 
+  Future<void> _startControlListener() async {
+    try {
+      final socket = await RawDatagramSocket.bind(
+        InternetAddress.anyIPv4,
+        _controlPort,
+        reuseAddress: true,
+      );
+      if (!mounted) {
+        socket.close();
+        return;
+      }
+      _controlSocket = socket;
+      _controlSubscription = socket.listen((event) {
+        if (event != RawSocketEvent.read) return;
+        final datagram = socket.receive();
+        if (datagram == null) return;
+        unawaited(_handleRemoteControl(datagram));
+      });
+      _dbg('Remote control listening on UDP $_controlPort');
+    } catch (error) {
+      _dbg('Remote control unavailable: $error');
+    }
+  }
+
+  bool _isTrustedControlSource(String address) {
+    final receiver = _receiver;
+    if (receiver == null) return false;
+    final allowed = <String>{
+      receiver.host,
+      receiver.preferredHost,
+      if (receiver.fallbackHost != null) receiver.fallbackHost!,
+    };
+    return allowed.contains(address);
+  }
+
+  Future<void> _handleRemoteControl(Datagram datagram) async {
+    if (!_isTrustedControlSource(datagram.address.address)) {
+      _dbg('Ignoring remote control from ${datagram.address.address}');
+      return;
+    }
+    try {
+      final payload =
+          jsonDecode(utf8.decode(datagram.data)) as Map<String, dynamic>;
+      if (payload['service'] != 'project-o-stream-control') return;
+
+      final slotIndex = (payload['slotIndex'] as num?)?.toInt();
+      if (slotIndex != null && slotIndex != _receiver?.slotIndex) return;
+
+      final action = payload['action'] as String?;
+      if (action == 'cycleLens') {
+        if (_busy) {
+          _dbg('Remote lens cycle ignored while busy');
+          return;
+        }
+        _dbg('Remote lens cycle requested by ${datagram.address.address}');
+        await _switchCamera();
+      }
+    } catch (error) {
+      _dbg('Remote control parse failed: $error');
+    }
+  }
+
   Future<void> _sendTelemetry() async {
     final host = _receiver?.host;
     if (host == null || !ReceiverDiscovery.isUsableEndpointHost(host)) return;
@@ -382,6 +436,8 @@ class _SenderScreenState extends State<SenderScreen> {
         'rttMs': _receiver?.roundTripMs ?? 0,
         'transport': _receiver?.transport ?? '',
         'slotIndex': _receiver?.slotIndex ?? 0,
+        'controlPort': _controlPort,
+        'lens': _config.lens,
       }));
       final socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
       socket.send(payload, InternetAddress(host), _telemetryPort);
@@ -408,8 +464,10 @@ class _SenderScreenState extends State<SenderScreen> {
       _setActiveReceiverHost(primaryConfig.host);
       return primaryConfig;
     } catch (primaryError, primaryStack) {
-      final fallbackHost = receiver?.fallbackHost?.trim();
-      if (fallbackHost == null ||
+      final fallbackReceiver = receiver;
+      final fallbackHost = fallbackReceiver?.fallbackHost?.trim();
+      if (fallbackReceiver == null ||
+          fallbackHost == null ||
           fallbackHost.isEmpty ||
           fallbackHost == primaryConfig.host ||
           !ReceiverDiscovery.isUsableEndpointHost(fallbackHost)) {
@@ -417,10 +475,9 @@ class _SenderScreenState extends State<SenderScreen> {
       }
 
       final primaryLabel =
-          receiver?.transportForHost(primaryConfig.host)?.toUpperCase() ??
-              'PRIMARY';
+          fallbackReceiver.transportForHost(primaryConfig.host).toUpperCase();
       final fallbackLabel =
-          receiver?.transportForHost(fallbackHost)?.toUpperCase() ?? 'BACKUP';
+          fallbackReceiver.transportForHost(fallbackHost).toUpperCase();
       _dbg(
         '$primaryLabel path ${primaryConfig.host} failed: $primaryError. '
         'Trying $fallbackLabel $fallbackHost.',
@@ -460,7 +517,6 @@ class _SenderScreenState extends State<SenderScreen> {
       if (_receiver == null) {
         setState(() => _status = 'No receiver found');
         if (_config.autoReconnect) {
-          _increaseAutoReconnectDelay();
           _scheduleAutoConnect();
         }
         return;
@@ -482,7 +538,6 @@ class _SenderScreenState extends State<SenderScreen> {
       _dbg('Stream error: $msg');
       setState(() => _status = 'Stream error: $msg');
       if (_config.autoReconnect) {
-        _increaseAutoReconnectDelay();
         _scheduleAutoConnect();
       }
     } finally {
@@ -567,7 +622,6 @@ class _SenderScreenState extends State<SenderScreen> {
       }
       setState(() => _status = 'Stream error: $msg');
       if (_config.autoReconnect) {
-        _increaseAutoReconnectDelay();
         _scheduleAutoConnect();
       }
     } finally {
