@@ -4,7 +4,8 @@ param(
     [int]$LatencyMs = 80,
     [int]$Cameras = 1,
     [switch]$NoDiscovery,
-    [switch]$DirectToObs
+    [switch]$DirectToObs,
+    [switch]$Ndi
 )
 
 $ErrorActionPreference = "Stop"
@@ -30,6 +31,18 @@ if (-not $DirectToObs) {
         }
     }
     $ffmpegPath = if ($ffmpeg.Source) { $ffmpeg.Source } else { $ffmpeg.FullName }
+}
+
+$ndiAvailable = $false
+if ($Ndi -and -not $DirectToObs) {
+    $muxersOutput = & $ffmpegPath -muxers 2>&1 | Out-String
+    $ndiAvailable = $muxersOutput -match 'libndi_newtek'
+    if ($ndiAvailable) {
+        Write-Host "[Receiver] NDI: enabled"
+    } else {
+        Write-Host "[Receiver] NDI: disabled (need NDI-enabled ffmpeg)"
+        Write-Host "           Get: github.com/valnoxy/ndi-ffmpeg-build"
+    }
 }
 
 $tailscaleIp = $null
@@ -60,6 +73,18 @@ foreach ($slot in $slots) {
         } catch {
             Write-Host "[Receiver] Firewall: could not open $($slot.srtPort): $($_.Exception.Message)"
         }
+    }
+}
+
+# Telemetry firewall rule (port 7075).
+$fwTeleRule = "Project-O-Stream Telemetry 7075"
+if (-not (Get-NetFirewallRule -DisplayName $fwTeleRule -ErrorAction SilentlyContinue)) {
+    try {
+        New-NetFirewallRule -DisplayName $fwTeleRule -Direction Inbound `
+            -Protocol UDP -LocalPort 7075 -Action Allow -ErrorAction Stop | Out-Null
+        Write-Host "[Receiver] Firewall: opened port 7075 UDP (telemetry)."
+    } catch {
+        Write-Host "[Receiver] Firewall: could not open 7075: $($_.Exception.Message)"
     }
 }
 
@@ -128,6 +153,9 @@ foreach ($slot in $slots) {
         Write-Host "                  [x] Restart playback when source becomes inactive"
     } else {
         Write-Host " OBS Input${label}: udp://127.0.0.1:$($slot.obsUdpPort)"
+        if ($Ndi -and $ndiAvailable) {
+            Write-Host " NDI${label}       : Project-O-Camera-$($slot.index + 1)  (NDI Virtual Input webcam)"
+        }
     }
 }
 if (-not $NoDiscovery) {
@@ -136,6 +164,11 @@ if (-not $NoDiscovery) {
 }
 Write-Host "========================================"
 Write-Host ""
+if ($Ndi -and $ndiAvailable) {
+    Write-Host "[Receiver] NDI active. Use NDI Virtual Input or OBS NDI plugin to receive NDI feeds."
+    Write-Host "           Tools: ndi.video/tools  |  obsproject.com/forum/resources/obs-ndi.528/"
+    Write-Host ""
+}
 
 if ($DirectToObs) {
     Write-Host "[Receiver] Direct-to-OBS mode. Phones connect directly to OBS via SRT."
@@ -168,7 +201,12 @@ function Start-SlotRelay {
         '-i', $inputUrl,
         '-map', '0', '-c', 'copy', '-f', 'mpegts', $target
     )
-    Write-Host "[Receiver] Cam $($slot.index + 1) waiting on SRT $($slot.srtPort) -> UDP $($slot.obsUdpPort)"
+    if ($Ndi -and $ndiAvailable) {
+        $ndiName = "Project-O-Camera-$($slot.index + 1)"
+        $ffmpegArgs += @('-map', '0', '-vf', 'format=uyvy422', '-c:a', 'pcm_s16le', '-f', 'libndi_newtek', $ndiName)
+    }
+    $ndiNote = if ($Ndi -and $ndiAvailable) { " + NDI: Project-O-Camera-$($slot.index + 1)" } else { "" }
+    Write-Host "[Receiver] Cam $($slot.index + 1) waiting on SRT $($slot.srtPort) -> UDP $($slot.obsUdpPort)$ndiNote"
     return Start-Process -FilePath $ffmpegPath -ArgumentList $ffmpegArgs -PassThru -NoNewWindow
 }
 
