@@ -13,6 +13,11 @@ class AppDelegate: FlutterAppDelegate, FlutterStreamHandler {
     private var bootOverlay: UIView?
     private weak var bootOverlayLabel: UILabel?
 
+    // ── volume button combo detection ─────────────────────────────
+    private var volumeObservation: NSKeyValueObservation?
+    private var lastVolumeChangeDir: Bool? = nil
+    private var lastVolumeChangeTime: Date? = nil
+
     override func application(
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
@@ -107,6 +112,7 @@ class AppDelegate: FlutterAppDelegate, FlutterStreamHandler {
         registerNativeBridge(messenger: controller.binaryMessenger)
         registerNativePreviewFactory()
         installBootOverlay(in: window, status: "native boot ok")
+        setupVolumeButtonObserver()
     }
 
     private func installBootOverlay(in window: UIWindow, status: String) {
@@ -280,6 +286,38 @@ class AppDelegate: FlutterAppDelegate, FlutterStreamHandler {
 
     func send(status: String, live: Bool) {
         eventSink?(["status": status, "live": live, "stats": ""])
+    }
+
+    // ── volume button combo ────────────────────────────────────────
+
+    private func setupVolumeButtonObserver() {
+        volumeObservation = AVAudioSession.sharedInstance().observe(
+            \.outputVolume,
+            options: [.new, .old]
+        ) { [weak self] _, change in
+            DispatchQueue.main.async {
+                guard let newVol = change.newValue,
+                      let oldVol = change.oldValue,
+                      newVol != oldVol else { return }
+                self?.handleVolumeChange(up: newVol > oldVol)
+            }
+        }
+    }
+
+    private func handleVolumeChange(up: Bool) {
+        let now = Date()
+        if let lastDir = lastVolumeChangeDir,
+           let lastTime = lastVolumeChangeTime,
+           lastDir != up,
+           now.timeIntervalSince(lastTime) < 0.5 {
+            // Opposite directions within 500 ms → combo
+            eventSink?(["volumeCombo": true] as [String: Any])
+            lastVolumeChangeDir = nil
+            lastVolumeChangeTime = nil
+        } else {
+            lastVolumeChangeDir = up
+            lastVolumeChangeTime = now
+        }
     }
 }
 
