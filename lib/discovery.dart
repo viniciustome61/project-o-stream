@@ -10,6 +10,8 @@ class DiscoveredReceiver {
     required this.obsUdpPort,
     required this.transport,
     required this.roundTripMs,
+    this.slotIndex = 0,
+    this.totalSlots = 1,
   });
 
   final String host;
@@ -18,6 +20,8 @@ class DiscoveredReceiver {
   final int obsUdpPort;
   final String transport;
   final int roundTripMs;
+  final int slotIndex;
+  final int totalSlots;
 
   String get label => '$hostname  $host:$srtPort  ${roundTripMs}ms';
   String get details => transport.toUpperCase();
@@ -27,6 +31,8 @@ class ReceiverDiscovery {
   static const int discoveryPort = 7071;
   static const int offerPort = 7072;
   static const String probe = 'PROJECTO_STREAM_DISCOVER';
+  static const String _lanProbe = 'PROJECTO_STREAM_LAN_PROBE';
+  static const String _lanAck = 'PROJECTO_STREAM_LAN_ACK';
 
   static bool isUsableEndpointHost(String? value) {
     return _isUsableEndpointHost(value);
@@ -48,11 +54,21 @@ class ReceiverDiscovery {
         final payload =
             jsonDecode(utf8.decode(datagram.data)) as Map<String, dynamic>;
         if (payload['service'] != 'project-o-stream') return;
+
         final payloadHost = (payload['host'] as String?)?.trim();
         final datagramHost = datagram.address.address;
-        final host =
+        String host =
             _isUsableEndpointHost(payloadHost) ? payloadHost! : datagramHost;
         if (!_isUsableEndpointHost(host)) return;
+
+        // If the server advertises a separate LAN IP, do a quick reachability
+        // probe. If it responds, use LAN for SRT (lower latency than Tailscale).
+        final lanIpStr = (payload['lanIp'] as String?)?.trim();
+        if (_isUsableEndpointHost(lanIpStr) && lanIpStr != host) {
+          final lanReachable = await _probeLan(lanIpStr!);
+          if (lanReachable) host = lanIpStr;
+        }
+
         if (!seen.add(host) || completer.isCompleted) return;
         final elapsed = DateTime.now().difference(started).inMilliseconds;
         completer.complete(
@@ -63,6 +79,8 @@ class ReceiverDiscovery {
             obsUdpPort: (payload['obsUdpPort'] as num?)?.toInt() ?? 15000,
             transport: (payload['transport'] as String?) ?? 'srt',
             roundTripMs: elapsed,
+            slotIndex: (payload['slotIndex'] as num?)?.toInt() ?? 0,
+            totalSlots: (payload['totalSlots'] as num?)?.toInt() ?? 1,
           ),
         );
       } catch (_) {
@@ -136,6 +154,42 @@ class ReceiverDiscovery {
     return result;
   }
 
+  // Sends PROJECTO_STREAM_LAN_PROBE to the server's LAN IP and waits for ACK.
+  // Used to decide whether to route SRT over LAN instead of Tailscale.
+  static Future<bool> _probeLan(
+    String ip, {
+    Duration timeout = const Duration(milliseconds: 500),
+  }) async {
+    try {
+      final socket =
+          await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
+      final lanCompleter = Completer<bool>();
+      final timer = Timer(timeout, () {
+        if (!lanCompleter.isCompleted) lanCompleter.complete(false);
+      });
+      socket.listen((event) {
+        if (event != RawSocketEvent.read) return;
+        final dg = socket.receive();
+        if (dg == null) return;
+        if (dg.address.address == ip && !lanCompleter.isCompleted) {
+          final msg = utf8.decode(dg.data, allowMalformed: true);
+          if (msg == _lanAck) lanCompleter.complete(true);
+        }
+      });
+      socket.send(
+        utf8.encode(_lanProbe),
+        InternetAddress(ip),
+        discoveryPort,
+      );
+      final result = await lanCompleter.future;
+      timer.cancel();
+      socket.close();
+      return result;
+    } catch (_) {
+      return false;
+    }
+  }
+
   static Iterable<InternetAddress> _candidateAddresses(
     String? cachedHost,
   ) sync* {
@@ -145,7 +199,7 @@ class ReceiverDiscovery {
       if (cachedAddress == null) return;
 
       yield cachedAddress;
-      // Scan the same /24 subnet as the cached host — faster than guessing a hardcoded range.
+      // Scan the same /24 subnet as the cached host.
       final parts = cachedAddress.address.split('.');
       if (_shouldScanSubnet(cachedAddress.address) && parts.length == 4) {
         final prefix = '${parts[0]}.${parts[1]}.${parts[2]}';
