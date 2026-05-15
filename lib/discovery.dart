@@ -83,6 +83,7 @@ class ReceiverDiscovery {
     final seen = <String>{};
     final sockets = <RawDatagramSocket>[];
     final subscriptions = <StreamSubscription<RawSocketEvent>>[];
+    final probeAddresses = await _candidateAddresses(cachedHost);
     Timer? pulseTimer;
 
     Future<void> finishFrom(Datagram datagram) async {
@@ -153,7 +154,7 @@ class ReceiverDiscovery {
         probeSocket.send(
             payload, InternetAddress('255.255.255.255'), discoveryPort);
       } on Object {/* broadcast unsupported on this interface — ignore */}
-      for (final address in _candidateAddresses(cachedHost)) {
+      for (final address in probeAddresses) {
         try {
           probeSocket.send(payload, address, discoveryPort);
         } on Object {
@@ -313,27 +314,76 @@ class ReceiverDiscovery {
     }
   }
 
-  static Iterable<InternetAddress> _candidateAddresses(
+  static Future<List<InternetAddress>> _candidateAddresses(
     String? cachedHost,
-  ) sync* {
+  ) async {
+    final addresses = <InternetAddress>[];
+    final seen = <String>{};
+
+    void add(String value) {
+      final address = _parseProbeAddress(value);
+      if (address != null && seen.add(address.address)) {
+        addresses.add(address);
+      }
+    }
+
+    void addSubnetCandidates(String value) {
+      final address = InternetAddress.tryParse(value);
+      if (address == null || address.type != InternetAddressType.IPv4) {
+        return;
+      }
+      if (!_shouldScanSubnet(address.address)) return;
+
+      final parts = address.address.split('.');
+      if (parts.length != 4) return;
+      final prefix = '${parts[0]}.${parts[1]}.${parts[2]}';
+
+      // Tethering and hotspot hosts are usually the subnet gateway. Probe the
+      // likely gateway and directed broadcast before falling back to a /24 scan.
+      add('$prefix.1');
+      add('$prefix.254');
+      add('$prefix.255');
+      for (var last = 1; last <= 254; last++) {
+        final candidate = '$prefix.$last';
+        if (candidate == address.address) continue;
+        add(candidate);
+      }
+    }
+
     final cached = cachedHost?.trim();
     if (cached != null && cached.isNotEmpty) {
       final cachedAddress = _parseProbeAddress(cached);
-      if (cachedAddress == null) return;
-
-      yield cachedAddress;
-      // Scan the same /24 subnet as the cached host.
-      final parts = cachedAddress.address.split('.');
-      if (_shouldScanSubnet(cachedAddress.address) && parts.length == 4) {
-        final prefix = '${parts[0]}.${parts[1]}.${parts[2]}';
-        for (var last = 1; last <= 254; last++) {
-          final candidate = '$prefix.$last';
-          if (candidate == cachedAddress.address) continue;
-          final address = _parseProbeAddress(candidate);
-          if (address != null) yield address;
-        }
+      if (cachedAddress != null) {
+        add(cachedAddress.address);
+        addSubnetCandidates(cachedAddress.address);
       }
     }
+
+    try {
+      final interfaces = await NetworkInterface.list(
+        type: InternetAddressType.IPv4,
+        includeLoopback: false,
+      );
+      for (final interface in interfaces) {
+        for (final address in interface.addresses) {
+          addSubnetCandidates(address.address);
+        }
+      }
+    } catch (_) {
+      // Interface enumeration is best-effort; static tether gateways below still
+      // cover common hotspot defaults.
+    }
+
+    for (final gateway in const [
+      '192.168.137.1', // Windows Mobile Hotspot / ICS
+      '192.168.43.1',  // common Android hotspot
+      '192.168.42.129', // common Android USB tether gateway
+      '172.20.10.1',   // common iPhone personal hotspot
+    ]) {
+      add(gateway);
+    }
+
+    return addresses;
   }
 
   static InternetAddress? _parseProbeAddress(String value) {

@@ -23,8 +23,7 @@ $script:lanIps = @()
 try {
     $script:lanIps = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
         Where-Object {
-            $_.IPAddress -notmatch '^(127\.|169\.254\.|100\.)' -and
-            $_.PrefixOrigin -in @('Dhcp', 'Manual')
+            $_.IPAddress -notmatch '^(127\.|169\.254\.|100\.)'
         } | Sort-Object InterfaceMetric,PrefixLength | Select-Object -ExpandProperty IPAddress -Unique)
 } catch { }
 $lanIp = if ($script:lanIps.Count -gt 0) { [string]$script:lanIps[0] } else { $null }
