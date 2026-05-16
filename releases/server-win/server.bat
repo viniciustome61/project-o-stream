@@ -19,14 +19,6 @@ if not exist "%DLL32%" set "DLL32=%~dp0UC\Install\UnityCaptureFilter32.dll"
 
 if not exist "%DLL64%" goto no_vcam
 
-:: ---- Require admin for Unity Capture dynamic registration ----
-net session >nul 2>&1
-if %errorlevel% neq 0 (
-    echo [Unity Capture] Requesting administrator access...
-    powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -ArgumentList '%*' -Verb RunAs"
-    exit /b
-)
-
 :: ---- Python vcam deps (script mode only) ----
 if exist "%~dp0server.exe" goto vcam_unblock
 python -c "import pyvirtualcam, numpy" >nul 2>&1
@@ -38,6 +30,7 @@ powershell -NoProfile -Command "Unblock-File -Path '%DLL64%' -ErrorAction Silent
 if exist "%DLL32%" powershell -NoProfile -Command "Unblock-File -Path '%DLL32%' -ErrorAction SilentlyContinue"
 
 :: Registration is handled dynamically by receiver.py on start/stop.
+:: Run this bat as Administrator (right-click -> Run as administrator) for virtual webcam.
 
 if exist "%~dp0server.exe" goto run_exe_vcam
 python "%~dp0receiver.py" --cameras 4 --webcam %*
