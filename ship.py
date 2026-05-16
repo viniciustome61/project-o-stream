@@ -201,7 +201,9 @@ class _DropAuthOnRedirect(urllib.request.HTTPRedirectHandler):
         return new_req
 
 
-def download_ipa(token: str, owner: str, repo: str, art_id: int, dest: Path) -> None:
+def download_artifact_file(
+    token: str, owner: str, repo: str, art_id: int, dest: Path, ext: str
+) -> None:
     url = f"{API_BASE}/repos/{owner}/{repo}/actions/artifacts/{art_id}/zip"
     req = urllib.request.Request(url, headers={
         "Authorization": f"token {token}",
@@ -216,12 +218,16 @@ def download_ipa(token: str, owner: str, repo: str, art_id: int, dest: Path) -> 
     zp.write_bytes(data)
     try:
         with zipfile.ZipFile(zp) as zf:
-            ipas = [n for n in zf.namelist() if n.lower().endswith(".ipa")]
-            if not ipas:
-                raise RuntimeError("No .ipa in artifact zip.")
-            dest.write_bytes(zf.read(ipas[0]))
+            matches = [n for n in zf.namelist() if n.lower().endswith(ext)]
+            if not matches:
+                raise RuntimeError(f"No {ext} in artifact zip.")
+            dest.write_bytes(zf.read(matches[0]))
     finally:
         zp.unlink(missing_ok=True)
+
+
+def download_ipa(token: str, owner: str, repo: str, art_id: int, dest: Path) -> None:
+    download_artifact_file(token, owner, repo, art_id, dest, ".ipa")
 
 
 # ── Gemini CLI ────────────────────────────────────────────────────────────────
@@ -404,14 +410,25 @@ def main() -> int:
     if args.run_id:
         print(f"[ship] --run-id {args.run_id}: skipping commit/push/wait.")
         short_sha = run_git(["rev-parse", "--short", "HEAD"], capture=True)
+        name = app_name()
         print("[ship] Downloading IPA...")
         art = artifact_id(token, owner, repo, args.run_id, args.artifact)
-        name = app_name()
         latest_ipa = REPO_ROOT / "releases" / f"{name}-unsigned.ipa"
         download_ipa(token, owner, repo, art, latest_ipa)
         for old in (REPO_ROOT / "releases").glob(f"{name}-unsigned-*.ipa"):
             old.unlink(missing_ok=True)
-        print(f"\n[ship] {latest_ipa.name}  (build {short_sha})")
+        print(f"[ship] {latest_ipa.name}  (build {short_sha})")
+        try:
+            apk_art = artifact_id(token, owner, repo, args.run_id, "android-debug-apk")
+            latest_apk = REPO_ROOT / "releases" / f"{name}-debug.apk"
+            print("[ship] Downloading APK...")
+            download_artifact_file(token, owner, repo, apk_art, latest_apk, ".apk")
+            for old in (REPO_ROOT / "releases").glob(f"{name}-debug-*.apk"):
+                old.unlink(missing_ok=True)
+            print(f"[ship] {latest_apk.name}  (build {short_sha})")
+        except Exception as exc:
+            print(f"[ship] APK not available: {exc}")
+        print()
         return 0
 
     # ── commit ────────────────────────────────────────────────────────────────
@@ -456,7 +473,21 @@ def main() -> int:
     for old in (REPO_ROOT / "releases").glob(f"{name}-unsigned-*.ipa"):
         old.unlink(missing_ok=True)
 
-    print(f"\n[ship] {latest_ipa.name}  (build {short_sha})")
+    print(f"[ship] {latest_ipa.name}  (build {short_sha})")
+
+    # ── APK ───────────────────────────────────────────────────────────────────
+    try:
+        apk_art = artifact_id(token, owner, repo, run_id, "android-debug-apk")
+        latest_apk = REPO_ROOT / "releases" / f"{name}-debug.apk"
+        print("[ship] Downloading APK...")
+        download_artifact_file(token, owner, repo, apk_art, latest_apk, ".apk")
+        for old in (REPO_ROOT / "releases").glob(f"{name}-debug-*.apk"):
+            old.unlink(missing_ok=True)
+        print(f"[ship] {latest_apk.name}  (build {short_sha})")
+    except Exception as exc:
+        print(f"[ship] APK not available: {exc}")
+
+    print()
     return 0
 
 
