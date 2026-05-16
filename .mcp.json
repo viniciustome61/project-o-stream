@@ -1,0 +1,16 @@
+{
+  "servers": {
+    "sideloadly": {
+      "type": "stdio",
+      "command": "python",
+      "cwd": "${workspaceFolder}",
+      "args": [
+        "MCP\\sideloadly_mcp_server.py"
+      ],
+      "env": {
+        "SIDELOADLY_EXE": "C:\\Sideloadly\\Sideloadly.exe",
+        "IPA_RELEASES_DIR": "${workspaceFolder}\\releases"
+      }
+    }
+  }
+}
