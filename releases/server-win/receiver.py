@@ -645,15 +645,16 @@ class Receiver:
         input_url = f"udp://127.0.0.1:{slot.webcam_port}?pkt_size=1316&timeout=0"
         cmd = [
             self.ffmpeg_path,
-            "-hide_banner", "-loglevel", "error",
+            "-hide_banner", "-loglevel", "warning",
             "-fflags", "nobuffer+discardcorrupt",
             "-probesize", "32k", "-analyzeduration", "0",
+            "-f", "mpegts",
             "-i", input_url,
             "-vf", f"scale={w}:{h}:flags=bilinear,format=rgb24",
-            "-an", "-f", "rawvideo", "-r", str(fps),
+            "-an", "-f", "rawvideo",
             "pipe:1",
         ]
-        return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
     def _start_ffmpeg(self, slot: SlotState) -> "subprocess.Popen[bytes]":
         latency_us = self.args.latency * 1000
@@ -761,13 +762,22 @@ class Receiver:
                     ) as cam:
                         slot.webcam_device = cam.device
                         self._log_msg(f"Cam {slot.index + 1}: webcam live on '{cam.device}' ({backend_name})")
+                        first_frame = True
                         while not self.stopping and proc.poll() is None:
                             raw = proc.stdout.read(frame_bytes)  # type: ignore[union-attr]
                             if len(raw) < frame_bytes:
                                 break
+                            if first_frame:
+                                self._log_msg(f"Cam {slot.index + 1}: webcam first frame on '{cam.device}'")
+                                first_frame = False
                             frame = _np.frombuffer(raw, dtype=_np.uint8).reshape((h, w, 3))
                             cam.send(frame)
                             cam.sleep_until_next_frame()
+                        if proc.returncode not in (None, 0, -9, -15):
+                            err = (proc.stderr.read() if proc.stderr else b"").decode(errors="replace").strip()
+                            tail = err.splitlines()[-1][:120] if err else ""
+                            if tail:
+                                self._log_msg(f"Cam {slot.index + 1}: webcam FFmpeg exited {proc.returncode}: {tail}")
                     break
                 except Exception as exc:
                     self._log_msg(f"Cam {slot.index + 1}: {backend_name} '{device_name}': {exc}")
@@ -938,7 +948,7 @@ class ReceiverApp(App[None]):
         Binding("l",      "cycle_lens",     "Lens",      show=True),
         Binding("t",      "toggle_torch",   "Torch",     show=True),
         Binding("z",      "zoom_in",        "Zoom+",     show=True),
-        Binding("shift+z","zoom_out",       "Zoom-",     show=True),
+        Binding("x",      "zoom_out",       "Zoom-",     show=True),
         Binding("k",      "kill_slot",      "Kill slot", show=True),
         Binding("q",      "quit_app",       "Quit",      show=True),
         Binding("ctrl+c", "quit_app",       "Quit",      show=False),
@@ -1184,20 +1194,38 @@ class ReceiverApp(App[None]):
 # ---------------------------------------------------------------------------
 
 def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Project-O Stream Receiver — Textual TUI")
-    p.add_argument("--cameras",       type=int,  default=1,     metavar="N")
-    p.add_argument("--port",          type=int,  default=7070,  metavar="PORT")
-    p.add_argument("--obs-port",      type=int,  default=15000, metavar="PORT")
-    p.add_argument("--latency",       type=int,  default=80,    metavar="MS")
-    p.add_argument("--ffmpeg",        type=str,  default=None,  metavar="PATH")
-    p.add_argument("--direct-to-obs",  action="store_true")
-    p.add_argument("--relay-to-obs",   action="store_true")
-    p.add_argument("--ndi",            action="store_true")
+    p = argparse.ArgumentParser(
+        description="Project-O Stream Receiver — Textual TUI\n\n"
+                    "Receives SRT camera streams from Project-O phones and relays\n"
+                    "them to OBS Studio as UDP Media Sources and/or virtual webcams.\n\n"
+                    "TUI keys: c=copy OBS URL  s=copy log  l=cycle lens  t=torch\n"
+                    "          z=zoom in  x=zoom out  k=kill slot  q=quit",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument("--cameras",       type=int,  default=1,     metavar="N",
+                   help="Number of camera slots to pre-create (default: 1, server.bat uses 4)")
+    p.add_argument("--port",          type=int,  default=7070,  metavar="PORT",
+                   help="Base SRT ingest port; slot i listens on PORT + i×3 (default: 7070)")
+    p.add_argument("--obs-port",      type=int,  default=15000, metavar="PORT",
+                   help="Base OBS UDP output port; slot i outputs on PORT + i×3 (default: 15000)")
+    p.add_argument("--latency",       type=int,  default=80,    metavar="MS",
+                   help="SRT receive latency in milliseconds (default: 80)")
+    p.add_argument("--ffmpeg",        type=str,  default=None,  metavar="PATH",
+                   help="Path to ffmpeg executable (default: ffmpeg from PATH)")
+    p.add_argument("--direct-to-obs",  action="store_true",
+                   help="Skip relay — give OBS the raw SRT URL instead of a UDP relay")
+    p.add_argument("--relay-to-obs",   action="store_true",
+                   help="Force relay mode even if --direct-to-obs was previously set")
+    p.add_argument("--ndi",            action="store_true",
+                   help="Also send each slot as an NDI source (requires NDI-enabled FFmpeg)")
     p.add_argument("--webcam",         action="store_true",
-                   help="Output each slot as a virtual webcam (Unity Capture driver required)")
-    p.add_argument("--webcam-width",   type=int, default=1280, metavar="PX")
-    p.add_argument("--webcam-height",  type=int, default=720,  metavar="PX")
-    p.add_argument("--webcam-fps",     type=int, default=30,   metavar="FPS")
+                   help="Output each slot as a virtual webcam via Unity Capture driver")
+    p.add_argument("--webcam-width",   type=int, default=1280, metavar="PX",
+                   help="Virtual webcam output width in pixels (default: 1280)")
+    p.add_argument("--webcam-height",  type=int, default=720,  metavar="PX",
+                   help="Virtual webcam output height in pixels (default: 720)")
+    p.add_argument("--webcam-fps",     type=int, default=30,   metavar="FPS",
+                   help="Virtual webcam output frame rate (default: 30)")
     args = p.parse_args()
     if args.relay_to_obs:
         args.direct_to_obs = False
