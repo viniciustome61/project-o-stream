@@ -2,7 +2,7 @@
 title Project O Stream - Server
 
 :: ---- If standalone exe exists, skip Python checks ----
-if exist "%~dp0server.exe" goto check_vcam
+if exist "%~dp0server.exe" goto install_deps_done
 
 python --version >nul 2>&1
 if %errorlevel% neq 0 goto no_python
@@ -10,51 +10,37 @@ if %errorlevel% neq 0 goto no_python
 python -c "import textual" >nul 2>&1
 if %errorlevel% neq 0 python -m pip install textual --quiet
 
-:: ---- Locate Unity Capture DLLs ----
-:check_vcam
+python -c "import pyvirtualcam, numpy" >nul 2>&1
+if %errorlevel% neq 0 python -m pip install pyvirtualcam numpy --quiet
+
+:install_deps_done
+
+:: ---- Optional: unblock Unity Capture DLLs if present ----
+:: Unity Capture is NOT required. It is used only when you press M to cycle
+:: the relay mode to VCAM. Slot 0 uses OBS Virtual Camera by default.
+:: For multi-camera virtual output use the --ndi flag (see NDI Tools at ndi.video).
 set "DLL64=%~dp0UnityCaptureFilter64.dll"
 if not exist "%DLL64%" set "DLL64=%~dp0UC\Install\UnityCaptureFilter64.dll"
 set "DLL32=%~dp0UnityCaptureFilter32.dll"
 if not exist "%DLL32%" set "DLL32=%~dp0UC\Install\UnityCaptureFilter32.dll"
 
-if not exist "%DLL64%" goto no_vcam
+if exist "%DLL64%" (
+    powershell -NoProfile -Command "Unblock-File -Path '%DLL64%' -ErrorAction SilentlyContinue"
+    if exist "%DLL32%" powershell -NoProfile -Command "Unblock-File -Path '%DLL32%' -ErrorAction SilentlyContinue"
+)
 
-:: ---- Python vcam deps (script mode only) ----
-if exist "%~dp0server.exe" goto vcam_unblock
-python -c "import pyvirtualcam, numpy" >nul 2>&1
-if %errorlevel% neq 0 python -m pip install pyvirtualcam numpy --quiet
-
-:: ---- Unblock DLLs (SmartScreen / download mark) ----
-:vcam_unblock
-powershell -NoProfile -Command "Unblock-File -Path '%DLL64%' -ErrorAction SilentlyContinue"
-if exist "%DLL32%" powershell -NoProfile -Command "Unblock-File -Path '%DLL32%' -ErrorAction SilentlyContinue"
-
-:: Registration is handled dynamically by receiver.py on start/stop.
-:: Run this bat as Administrator (right-click -> Run as administrator) for virtual webcam.
-
-if exist "%~dp0server.exe" goto run_exe_vcam
+:: ---- Launch ----
+if exist "%~dp0server.exe" goto run_exe
 python "%~dp0receiver.py" --cameras 4 --webcam %*
 goto end
 
-:run_exe_vcam
+:run_exe
 "%~dp0server.exe" --cameras 4 --webcam %*
-goto end
-
-:: ---- No DLLs found ----
-:no_vcam
-echo [info] Unity Capture DLLs not found - virtual webcam disabled.
-echo [info] Place UC\Install\UnityCaptureFilter64.dll next to server.bat to enable.
-if exist "%~dp0server.exe" goto run_exe_novcam
-python "%~dp0receiver.py" %*
-goto end
-
-:run_exe_novcam
-"%~dp0server.exe" %*
 goto end
 
 :: ---- No Python ----
 :no_python
-if exist "%~dp0server.exe" goto check_vcam
+if exist "%~dp0server.exe" goto install_deps_done
 echo [ERROR] Python not found. Install Python 3.10+ from python.org
 echo [ERROR] Or run build.bat to create server.exe (no Python needed at runtime).
 pause

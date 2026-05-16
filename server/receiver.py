@@ -485,8 +485,6 @@ class Receiver:
                 srt_port = args.port + i * 3,
                 obs_port = args.obs_port + i * 3,
             )
-            if getattr(args, "webcam", False):
-                slot.relay_mode = "vcam"
             self.slots.append(slot)
 
         self.assigner = SlotAssigner(
@@ -496,13 +494,6 @@ class Receiver:
 
         self._dll64, self._dll32 = _find_ucap_dlls() if _VCAM_AVAILABLE else (None, None)
         self._ucap_count   = 0
-        if self._dll64 and getattr(args, "webcam", False):
-            threading.Thread(
-                target=self._ensure_ucap_devices,
-                args=(args.cameras,),
-                daemon=True,
-                name="ucap-reg-startup",
-            ).start()
 
         self.ffmpeg_path   = args.ffmpeg or "ffmpeg"
         self.ndi_available = False
@@ -526,19 +517,10 @@ class Receiver:
     def _grow_slot(self) -> int:
         i = len(self.slots)
         slot = SlotState(index=i, srt_port=self.args.port + i * 3, obs_port=self.args.obs_port + i * 3)
-        if getattr(self.args, "webcam", False):
-            slot.relay_mode = "vcam"
         self.slots.append(slot)
         _open_firewall(slot.srt_port, "UDP")
         _open_firewall(slot.srt_port, "TCP")
         self._log_msg(f"Camera {i + 1} added automatically (SRT :{slot.srt_port} → UDP :{slot.obs_port})")
-        if self._dll64 and getattr(self.args, "webcam", False):
-            threading.Thread(
-                target=self._ensure_ucap_devices,
-                args=(i + 1,),
-                daemon=True,
-                name=f"ucap-reg-{i + 1}",
-            ).start()
         return i
 
     def _ensure_ucap_devices(self, needed: int) -> None:
@@ -902,10 +884,12 @@ class Receiver:
         w, h, fps = self.args.webcam_width, self.args.webcam_height, self.args.webcam_fps
         frame_bytes = w * h * 3
 
-        unity_name = "Unity Video Capture" if slot.index == 0 else f"Unity Video Capture ({slot.index})"
-        backends: list[tuple[str, str]] = [("unitycapture", unity_name)]
+        backends: list[tuple[str, str]] = []
         if slot.index == 0:
             backends.append(("obs", "OBS Virtual Camera"))
+        if self._dll64:
+            unity_name = "Unity Video Capture" if slot.index == 0 else f"Unity Video Capture ({slot.index})"
+            backends.append(("unitycapture", unity_name))
 
         self._log_msg(f"Cam {slot.index + 1}: webcam {w}x{h}@{fps}fps")
 
@@ -979,9 +963,9 @@ class Receiver:
             else:
                 slot.webcam_device = None
                 hint = (
-                    "install Unity Capture (github.com/schellingb/UnityCapture)"
-                    if slot.index > 0 else
-                    "install Unity Capture or enable OBS Virtual Camera"
+                    "open OBS → Tools → Virtual Camera → Start"
+                    if slot.index == 0 else
+                    "use --ndi flag for multi-camera virtual output (NDI Tools at ndi.video)"
                 )
                 self._log_msg(f"Cam {slot.index + 1}: no webcam backend — {hint}")
                 time.sleep(10)
@@ -1019,14 +1003,6 @@ class Receiver:
     # ------------------------------------------------------------------ run / shutdown
 
     def run(self) -> None:
-        if self._dll64 and getattr(self.args, "webcam", False):
-            threading.Thread(
-                target=self._ensure_ucap_devices,
-                args=(self.args.cameras,),
-                daemon=True,
-                name="ucap-init",
-            ).start()
-
         if self.args.ndi:
             self._log_msg(
                 "NDI: enabled (libndi_newtek found)" if self.ndi_available
@@ -1246,8 +1222,10 @@ class ReceiverApp(App[None]):
         if self._receiver.args.ndi and self._receiver.ndi_available:
             obs.append(f"  NDI: Project-O-Camera-{s.index + 1}", style="cyan dim")
         if getattr(self._receiver.args, "webcam", False) and _VCAM_AVAILABLE:
-            vcam_name = s.webcam_device or ("Unity Video Capture" if s.index == 0 else f"Unity Video Capture ({s.index})")
-            obs.append(f"  Webcam: {vcam_name}", style="magenta" if s.webcam_device else "magenta dim")
+            if s.webcam_device:
+                obs.append(f"  Webcam: {s.webcam_device}", style="magenta")
+            elif s.index == 0:
+                obs.append("  Webcam: OBS Virtual Camera", style="magenta dim")
 
         st = s.ffmpeg_status
         if st == "listening":
@@ -1408,6 +1386,13 @@ class ReceiverApp(App[None]):
                 slot.proc.kill()
             except Exception:
                 pass
+        if next_mode == "vcam" and r._dll64:
+            threading.Thread(
+                target=r._ensure_ucap_devices,
+                args=(slot.index + 1,),
+                daemon=True,
+                name=f"ucap-demand-{slot.index}",
+            ).start()
         r._log_msg(f"Cam {slot.index + 1}: mode → {next_mode}")
 
     def action_copy_obs_input(self) -> None:
@@ -1474,7 +1459,9 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--ndi",            action="store_true",
                    help="Also send each slot as an NDI source (requires NDI-enabled FFmpeg)")
     p.add_argument("--webcam",         action="store_true",
-                   help="Output each slot as a virtual webcam via Unity Capture driver")
+                   help="Output slot 0 as a virtual webcam via OBS Virtual Camera (no install required). "
+                        "Unity Capture DLLs are optional and used only when VCAM mode is selected via the M key. "
+                        "Use --ndi for multi-camera virtual output.")
     p.add_argument("--webcam-width",   type=int, default=1280, metavar="PX",
                    help="Virtual webcam output width in pixels (default: 1280)")
     p.add_argument("--webcam-height",  type=int, default=720,  metavar="PX",
