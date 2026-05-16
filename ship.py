@@ -407,12 +407,11 @@ def main() -> int:
         print("[ship] Downloading IPA...")
         art = artifact_id(token, owner, repo, args.run_id, args.artifact)
         name = app_name()
-        sha_ipa = REPO_ROOT / "releases" / f"{name}-unsigned-{short_sha}.ipa"
         latest_ipa = REPO_ROOT / "releases" / f"{name}-unsigned.ipa"
-        download_ipa(token, owner, repo, art, sha_ipa)
-        shutil.copy2(sha_ipa, latest_ipa)
-        print(f"\n[ship] {sha_ipa.name}")
-        print(f"[ship] {latest_ipa.name}  <- latest")
+        download_ipa(token, owner, repo, art, latest_ipa)
+        for old in (REPO_ROOT / "releases").glob(f"{name}-unsigned-*.ipa"):
+            old.unlink(missing_ok=True)
+        print(f"\n[ship] {latest_ipa.name}  (build {short_sha})")
         return 0
 
     # ── commit ────────────────────────────────────────────────────────────────
@@ -449,14 +448,15 @@ def main() -> int:
     print("[ship] Downloading IPA...")
     art = artifact_id(token, owner, repo, run_id, args.artifact)
     name = app_name()
-    sha_ipa = REPO_ROOT / "releases" / f"{name}-unsigned-{short_sha}.ipa"
     latest_ipa = REPO_ROOT / "releases" / f"{name}-unsigned.ipa"
 
-    download_ipa(token, owner, repo, art, sha_ipa)
-    shutil.copy2(sha_ipa, latest_ipa)
+    download_ipa(token, owner, repo, art, latest_ipa)
 
-    print(f"\n[ship] {sha_ipa.name}")
-    print(f"[ship] {latest_ipa.name}  <- latest")
+    # Remove any old versioned IPAs left from previous runs
+    for old in (REPO_ROOT / "releases").glob(f"{name}-unsigned-*.ipa"):
+        old.unlink(missing_ok=True)
+
+    print(f"\n[ship] {latest_ipa.name}  (build {short_sha})")
     return 0
 
 
