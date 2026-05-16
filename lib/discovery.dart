@@ -199,77 +199,58 @@ class ReceiverDiscovery {
     final lanIps = payload['lanIps'];
     final tailscaleIp = (payload['tailscaleIp'] as String?)?.trim();
 
-    final lanCandidates = <String>[];
-    final tailscaleCandidates = <String>[];
+    // Collect unique candidates preserving insertion order (highest priority first).
+    final candidates = <_HostCandidate>[];
+    final seen = <String>{};
 
-    void addLan(String? value) {
+    void add(String? value, String transport) {
       final host = value?.trim();
-      if (_isLanEndpointHost(host) && !lanCandidates.contains(host)) {
-        lanCandidates.add(host!);
-      }
+      if (!_isUsableEndpointHost(host) || !seen.add(host!)) return;
+      candidates.add(_HostCandidate(host: host, transport: transport));
     }
 
-    void addTailscale(String? value) {
-      final host = value?.trim();
-      if (_isTailscaleEndpointHost(host) &&
-          !tailscaleCandidates.contains(host)) {
-        tailscaleCandidates.add(host!);
-      }
-    }
-
-    addLan(datagramHost);
-    addLan(lanIp);
+    add(datagramHost, _transportForHost(datagramHost));
+    add(lanIp, 'lan');
     if (lanIps is List) {
-      for (final candidate in lanIps) {
-        addLan(candidate?.toString());
+      for (final ip in lanIps) {
+        add(ip?.toString(), 'lan');
       }
     }
-    addLan(payloadHost);
+    add(tailscaleIp, 'tailscale');
+    add(payloadHost, _transportForHost(payloadHost ?? ''));
 
-    addTailscale(tailscaleIp);
-    addTailscale(payloadHost);
-    addTailscale(datagramHost);
+    if (candidates.isEmpty) return null;
 
-    for (final candidate in lanCandidates) {
-      final reachedOverLan = candidate == datagramHost ||
-          await _probeLan(candidate, timeout: const Duration(milliseconds: 450));
-      if (reachedOverLan) {
-        final fallback = _firstCandidate(tailscaleCandidates);
-        return _EndpointSelection(
-          host: candidate,
-          transport: 'lan',
-          fallbackHost: fallback,
-          fallbackTransport: fallback == null ? null : 'tailscale',
-        );
-      }
-    }
+    // Probe all candidates in parallel — pick by lowest stable RTT.
+    final results = await Future.wait(
+      candidates.map((c) async {
+        final rtt = await _measureLatency(c.host);
+        return _ProbeResult(candidate: c, rtt: rtt);
+      }),
+    );
 
-    final tailscaleHost = _firstCandidate(tailscaleCandidates);
-    if (tailscaleHost != null) {
+    final reachable = results.where((r) => r.rtt != null).toList()
+      ..sort((a, b) => a.rtt!.compareTo(b.rtt!));
+
+    if (reachable.isEmpty) {
+      // No path responded — use heuristic order (insertion priority).
       return _EndpointSelection(
-        host: tailscaleHost,
-        transport: 'tailscale',
+        host: candidates.first.host,
+        transport: candidates.first.transport,
+        fallbackHost: candidates.length > 1 ? candidates[1].host : null,
+        fallbackTransport: candidates.length > 1 ? candidates[1].transport : null,
       );
     }
 
-    final directHost = _firstUsableHost([payloadHost, datagramHost]);
-    if (directHost == null) return null;
+    final best = reachable.first;
+    final second = reachable.length > 1 ? reachable[1] : null;
+
     return _EndpointSelection(
-      host: directHost,
-      transport: _transportForHost(directHost),
+      host: best.candidate.host,
+      transport: best.candidate.transport,
+      fallbackHost: second?.candidate.host,
+      fallbackTransport: second?.candidate.transport,
     );
-  }
-
-  static String? _firstCandidate(List<String> values) {
-    return values.isEmpty ? null : values.first;
-  }
-
-  static String? _firstUsableHost(Iterable<String?> values) {
-    for (final value in values) {
-      final host = value?.trim();
-      if (_isUsableEndpointHost(host)) return host;
-    }
-    return null;
   }
 
   static String _transportForHost(String host) {
@@ -278,39 +259,54 @@ class ReceiverDiscovery {
     return 'srt';
   }
 
-  // Sends PROJECTO_STREAM_LAN_PROBE to the server's LAN IP and waits for ACK.
-  // Used to decide whether to route SRT over LAN instead of Tailscale.
-  static Future<bool> _probeLan(
-    String ip, {
-    Duration timeout = const Duration(milliseconds: 500),
+  /// Sends up to [probes] LAN probes to [host] with [intervalMs] between them
+  /// and returns the minimum observed RTT in milliseconds, or null if no
+  /// response arrived. All candidates are probed in parallel by the caller.
+  static Future<int?> _measureLatency(
+    String host, {
+    int probes = 3,
+    int intervalMs = 80,
+    int perProbeTimeoutMs = 200,
   }) async {
     try {
-      final socket =
-          await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
-      final lanCompleter = Completer<bool>();
-      final timer = Timer(timeout, () {
-        if (!lanCompleter.isCompleted) lanCompleter.complete(false);
-      });
+      final socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
+      final address = InternetAddress(host);
+      final bytes = utf8.encode(_lanProbe);
+      int? minRtt;
+      Completer<int?>? active;
+      var t0 = 0;
+
       socket.listen((event) {
         if (event != RawSocketEvent.read) return;
         final dg = socket.receive();
-        if (dg == null) return;
-        if (dg.address.address == ip && !lanCompleter.isCompleted) {
-          final msg = utf8.decode(dg.data, allowMalformed: true);
-          if (msg == _lanAck) lanCompleter.complete(true);
-        }
+        if (dg == null || dg.address.address != host) return;
+        if (utf8.decode(dg.data, allowMalformed: true) != _lanAck) return;
+        final rtt = DateTime.now().millisecondsSinceEpoch - t0;
+        if (active != null && !active!.isCompleted) active!.complete(rtt);
       });
-      socket.send(
-        utf8.encode(_lanProbe),
-        InternetAddress(ip),
-        discoveryPort,
-      );
-      final result = await lanCompleter.future;
-      timer.cancel();
+
+      for (var i = 0; i < probes; i++) {
+        active = Completer<int?>();
+        t0 = DateTime.now().millisecondsSinceEpoch;
+        socket.send(bytes, address, discoveryPort);
+
+        final rtt = await active!.future.timeout(
+          Duration(milliseconds: perProbeTimeoutMs),
+          onTimeout: () => null,
+        );
+
+        if (rtt != null && (minRtt == null || rtt < minRtt)) minRtt = rtt;
+        // Early exit: LAN-like latency confirmed, no need for more probes.
+        if (minRtt != null && minRtt < 5) break;
+        if (i < probes - 1) {
+          await Future.delayed(Duration(milliseconds: intervalMs));
+        }
+      }
+
       socket.close();
-      return result;
+      return minRtt;
     } catch (_) {
-      return false;
+      return null;
     }
   }
 
@@ -461,4 +457,16 @@ class _EndpointSelection {
   final String transport;
   final String? fallbackHost;
   final String? fallbackTransport;
+}
+
+class _HostCandidate {
+  const _HostCandidate({required this.host, required this.transport});
+  final String host;
+  final String transport;
+}
+
+class _ProbeResult {
+  const _ProbeResult({required this.candidate, required this.rtt});
+  final _HostCandidate candidate;
+  final int? rtt;
 }
