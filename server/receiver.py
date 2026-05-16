@@ -727,6 +727,12 @@ class Receiver:
         self._log_msg(f"Cam {slot.index + 1}: webcam {w}x{h}@{fps}fps")
 
         while not self.stopping:
+            # Wait until a phone is assigned to this slot before occupying the driver.
+            while slot.ip is None:
+                if self.stopping:
+                    return
+                time.sleep(0.5)
+
             waited = 0
             while not (slot.proc and slot.proc.poll() is None):
                 if self.stopping:
