@@ -304,6 +304,14 @@ def _find_ucap_dlls() -> "tuple[Optional[str], Optional[str]]":
     return _find("UnityCaptureFilter64.dll"), _find("UnityCaptureFilter32.dll")
 
 
+def _is_admin() -> bool:
+    try:
+        import ctypes
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
 def _ucap_regsvr(dll64: str, dll32: Optional[str], extra_args: list) -> "tuple[bool, str]":
     # Mirror UC's own InstallMultipleDevices.bat: CD to DLL dir, relative names, /s for silent.
     dll_dir = os.path.dirname(dll64)
@@ -311,7 +319,7 @@ def _ucap_regsvr(dll64: str, dll32: Optional[str], extra_args: list) -> "tuple[b
     reg64 = os.path.join(sys_root, "System32", "regsvr32.exe")
     reg32 = os.path.join(sys_root, "SysWOW64", "regsvr32.exe")
 
-    def _run_one(exe: str, dll_name: str) -> int:
+    def _run_direct(exe: str, dll_name: str) -> int:
         proc = subprocess.Popen(
             [exe, "/s"] + extra_args + [dll_name],
             cwd=dll_dir,
@@ -324,13 +332,42 @@ def _ucap_regsvr(dll64: str, dll32: Optional[str], extra_args: list) -> "tuple[b
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
-            return -999  # timeout (not admin / UAC blocked)
+            return -999
+
+    def _run_elevated(exe: str, dll_name: str) -> int:
+        # Ask Windows for a UAC elevation via PowerShell Start-Process -Verb RunAs.
+        # If the caller is already admin, no dialog appears and the process runs inline.
+        ps_args = ", ".join(f'"{a}"' for a in (["/s"] + extra_args + [dll_name]))
+        ps_cmd = (
+            f'$p = Start-Process -FilePath "{exe}" -ArgumentList @({ps_args}) '
+            f'-Verb RunAs -Wait -PassThru -WorkingDirectory "{dll_dir}"; '
+            f'if ($p) {{ exit $p.ExitCode }} else {{ exit 1 }}'
+        )
+        try:
+            r = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
+                capture_output=True, timeout=60,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            return r.returncode
+        except Exception:
+            return -998
 
     try:
-        rc32 = _run_one(reg32, os.path.basename(dll32)) if dll32 and os.path.isfile(dll32) else None
-        rc64 = _run_one(reg64, os.path.basename(dll64))
+        rc32 = _run_direct(reg32, os.path.basename(dll32)) if dll32 and os.path.isfile(dll32) else None
+        rc64 = _run_direct(reg64, os.path.basename(dll64))
+        ok = (rc64 == 0) or (rc32 is not None and rc32 == 0)
+
+        if not ok:
+            # Direct call failed — re-attempt via UAC elevation (no dialog if already admin).
+            rc32_e = _run_elevated(reg32, os.path.basename(dll32)) if dll32 and os.path.isfile(dll32) else None
+            rc64_e = _run_elevated(reg64, os.path.basename(dll64))
+            ok_e = (rc64_e == 0) or (rc32_e is not None and rc32_e == 0)
+            if ok_e:
+                rc64, rc32 = rc64_e, rc32_e
+                ok = True
+
         detail = f"rc64={rc64}({rc64:#010x})" + (f" rc32={rc32}({rc32:#010x})" if rc32 is not None else "")
-        ok = (rc64 == 0) or (rc32 == 0)
         return ok, detail
     except Exception as e:
         return False, str(e)
@@ -459,6 +496,13 @@ class Receiver:
 
         self._dll64, self._dll32 = _find_ucap_dlls() if _VCAM_AVAILABLE else (None, None)
         self._ucap_count   = 0
+        if self._dll64 and getattr(args, "webcam", False):
+            threading.Thread(
+                target=self._ensure_ucap_devices,
+                args=(args.cameras,),
+                daemon=True,
+                name="ucap-reg-startup",
+            ).start()
 
         self.ffmpeg_path   = args.ffmpeg or "ffmpeg"
         self.ndi_available = False
@@ -755,7 +799,9 @@ class Receiver:
         sock.close()
 
     def _start_webcam_ffmpeg(self, slot: SlotState, w: int, h: int, fps: int) -> "subprocess.Popen[bytes]":
-        input_url = f"udp://127.0.0.1:{slot.webcam_port}?pkt_size=1316&timeout=0"
+        # timeout=5000000 (5s) so FFmpeg exits cleanly when the phone stops streaming
+        # instead of blocking the frame-read pipe forever.
+        input_url = f"udp://127.0.0.1:{slot.webcam_port}?pkt_size=1316&timeout=5000000"
         cmd = [
             self.ffmpeg_path,
             "-hide_banner", "-loglevel", "warning",
@@ -889,6 +935,18 @@ class Receiver:
                 proc: Optional[subprocess.Popen] = None  # type: ignore[type-arg]
                 try:
                     proc = self._start_webcam_ffmpeg(slot, w, h, fps)
+                    # Buffer the first complete frame before opening the capture device.
+                    # This prevents Unity Capture from showing "has not started sending
+                    # image data" to consumers (OBS) during the decode startup gap.
+                    first_raw = b""
+                    while len(first_raw) < frame_bytes and proc.poll() is None:
+                        chunk = proc.stdout.read(frame_bytes - len(first_raw))  # type: ignore[union-attr]
+                        if not chunk:
+                            break
+                        first_raw += chunk
+                    if len(first_raw) < frame_bytes:
+                        # Decoder exited without data (phone not streaming yet); retry later.
+                        continue
                     with _pvc.Camera(
                         width=w, height=h, fps=fps,
                         fmt=_pvc.PixelFormat.RGB,
@@ -898,16 +956,13 @@ class Receiver:
                     ) as cam:
                         slot.webcam_device = cam.device
                         self._log_msg(f"Cam {slot.index + 1}: webcam live on '{cam.device}' ({backend_name})")
-                        first_frame = True
+                        cam.send(_np.frombuffer(first_raw, dtype=_np.uint8).reshape((h, w, 3)))
+                        cam.sleep_until_next_frame()
                         while not self.stopping and proc.poll() is None:
                             raw = proc.stdout.read(frame_bytes)  # type: ignore[union-attr]
                             if len(raw) < frame_bytes:
                                 break
-                            if first_frame:
-                                self._log_msg(f"Cam {slot.index + 1}: webcam first frame on '{cam.device}'")
-                                first_frame = False
-                            frame = _np.frombuffer(raw, dtype=_np.uint8).reshape((h, w, 3))
-                            cam.send(frame)
+                            cam.send(_np.frombuffer(raw, dtype=_np.uint8).reshape((h, w, 3)))
                             cam.sleep_until_next_frame()
                         if proc.returncode not in (None, 0, -9, -15):
                             err = (proc.stderr.read() if proc.stderr else b"").decode(errors="replace").strip()
