@@ -292,9 +292,10 @@ def _open_firewall(port: int, proto: str = "UDP") -> None:
 
 class SlotState:
     def __init__(self, index: int, srt_port: int, obs_port: int):
-        self.index    = index
-        self.srt_port = srt_port
-        self.obs_port = obs_port
+        self.index       = index
+        self.srt_port    = srt_port
+        self.obs_port    = obs_port
+        self.webcam_port = obs_port + 1  # dedicated port so webcam and OBS don't compete
         self.ip: Optional[str] = None
         self.hostname:  Optional[str]   = None
         self.lens:      Optional[str]   = None
@@ -304,9 +305,12 @@ class SlotState:
         self.thermal:   Optional[str]   = None
         self.rtt_ms:    Optional[float] = None
         self.transport: Optional[str]   = None
-        self.tele_ts:      float           = 0.0
-        self.ffmpeg_status: str           = "idle"
-        self.proc: Optional[subprocess.Popen] = None  # type: ignore[type-arg]
+        self.tele_ts:       float           = 0.0
+        self.ffmpeg_status: str            = "idle"
+        self.proc:          Optional[subprocess.Popen] = None  # type: ignore[type-arg]
+        self.webcam_device: Optional[str]  = None
+        self.zoom_level:    float          = 1.0
+        self.torch_on:      bool           = False
 
     @property
     def connected(self) -> bool:
@@ -395,6 +399,8 @@ class Receiver:
         self._log_lock = threading.Lock()
         self._log: list[tuple[str, str]] = []
         self._app: Optional["ReceiverApp"] = None
+        log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "server.log")
+        self._log_file = open(log_path, "a", encoding="utf-8", buffering=1)  # noqa: SIM115
 
         for slot in self.slots:
             _open_firewall(slot.srt_port, "UDP")
@@ -421,6 +427,10 @@ class Receiver:
             self._log.append((ts, msg))
             if len(self._log) > 200:
                 self._log.pop(0)
+            try:
+                self._log_file.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} {msg}\n")
+            except Exception:
+                pass
         if self._app is not None:
             try:
                 self._app.call_from_thread(self._app.push_log, ts, msg)
@@ -632,8 +642,7 @@ class Receiver:
         sock.close()
 
     def _start_webcam_ffmpeg(self, slot: SlotState, w: int, h: int, fps: int) -> "subprocess.Popen[bytes]":
-        """Decode the relay UDP stream to raw RGB24 frames piped to stdout."""
-        input_url = f"udp://127.0.0.1:{slot.obs_port}?pkt_size=1316"
+        input_url = f"udp://127.0.0.1:{slot.webcam_port}?pkt_size=1316&timeout=0"
         cmd = [
             self.ffmpeg_path,
             "-hide_banner", "-loglevel", "error",
@@ -654,15 +663,19 @@ class Receiver:
             f"&latency={latency_us}&rcvlatency={latency_us}&peerlatency={latency_us}"
             f"&tlpktdrop=1&pkt_size=1316"
         )
-        target = f"udp://127.0.0.1:{slot.obs_port}?pkt_size=1316"
+        obs_target    = f"udp://127.0.0.1:{slot.obs_port}?pkt_size=1316"
+        webcam_target = f"udp://127.0.0.1:{slot.webcam_port}?pkt_size=1316"
         cmd = [
             self.ffmpeg_path,
             "-hide_banner", "-loglevel", "error",
             "-fflags", "nobuffer", "-flags", "low_delay",
             "-probesize", "32k", "-analyzeduration", "0",
             "-i", input_url,
-            "-map", "0", "-c", "copy", "-f", "mpegts", target,
+            "-map", "0", "-c", "copy", "-f", "mpegts", obs_target,
         ]
+        if getattr(self.args, "webcam", False):
+            # second output on dedicated port so webcam FFmpeg and OBS don't share a socket
+            cmd += ["-map", "0", "-c", "copy", "-f", "mpegts", webcam_target]
         if self.args.ndi and self.ndi_available:
             ndi_name = f"Project-O-Camera-{slot.index + 1}"
             cmd += ["-map", "0", "-vf", "format=uyvy422", "-c:a", "pcm_s16le", "-f", "libndi_newtek", ndi_name]
@@ -703,16 +716,17 @@ class Receiver:
             self._log_msg("Webcam: pip install pyvirtualcam numpy to enable")
             return
 
-        w   = self.args.webcam_width
-        h   = self.args.webcam_height
-        fps = self.args.webcam_fps
+        w, h, fps = self.args.webcam_width, self.args.webcam_height, self.args.webcam_fps
         frame_bytes = w * h * 3
-        device = "Unity Video Capture" if slot.index == 0 else f"Unity Video Capture ({slot.index})"
 
-        self._log_msg(f"Cam {slot.index + 1}: webcam '{device}' {w}x{h}@{fps}fps")
+        unity_name = "Unity Video Capture" if slot.index == 0 else f"Unity Video Capture ({slot.index})"
+        backends: list[tuple[str, str]] = [("unitycapture", unity_name)]
+        if slot.index == 0:
+            backends.append(("obs", "OBS Virtual Camera"))
+
+        self._log_msg(f"Cam {slot.index + 1}: webcam {w}x{h}@{fps}fps")
 
         while not self.stopping:
-            # Wait for the relay FFmpeg to be running before reading from its UDP port.
             waited = 0
             while not (slot.proc and slot.proc.poll() is None):
                 if self.stopping:
@@ -726,31 +740,47 @@ class Receiver:
             if self.stopping:
                 return
 
-            proc: Optional[subprocess.Popen] = None  # type: ignore[type-arg]
-            try:
-                proc = self._start_webcam_ffmpeg(slot, w, h, fps)
-                with _pvc.Camera(
-                    width=w, height=h, fps=fps,
-                    fmt=_pvc.PixelFormat.RGB,
-                    device=device,
-                    backend="unitycapture",
-                    print_fps=False,
-                ) as cam:
-                    self._log_msg(f"Cam {slot.index + 1}: webcam live on '{cam.device}'")
-                    while not self.stopping and proc.poll() is None:
-                        raw = proc.stdout.read(frame_bytes)  # type: ignore[union-attr]
-                        if len(raw) < frame_bytes:
-                            break
-                        frame = _np.frombuffer(raw, dtype=_np.uint8).reshape((h, w, 3))
-                        cam.send(frame)
-                        cam.sleep_until_next_frame()
-            except Exception as exc:
-                self._log_msg(f"Cam {slot.index + 1}: vcam '{device}' error: {exc}")
-            finally:
-                if proc is not None and proc.poll() is None:
-                    proc.kill()
-                    proc.wait()
+            for backend_name, device_name in backends:
+                if self.stopping:
+                    return
+                proc: Optional[subprocess.Popen] = None  # type: ignore[type-arg]
+                try:
+                    proc = self._start_webcam_ffmpeg(slot, w, h, fps)
+                    with _pvc.Camera(
+                        width=w, height=h, fps=fps,
+                        fmt=_pvc.PixelFormat.RGB,
+                        device=device_name,
+                        backend=backend_name,
+                        print_fps=False,
+                    ) as cam:
+                        slot.webcam_device = cam.device
+                        self._log_msg(f"Cam {slot.index + 1}: webcam live on '{cam.device}' ({backend_name})")
+                        while not self.stopping and proc.poll() is None:
+                            raw = proc.stdout.read(frame_bytes)  # type: ignore[union-attr]
+                            if len(raw) < frame_bytes:
+                                break
+                            frame = _np.frombuffer(raw, dtype=_np.uint8).reshape((h, w, 3))
+                            cam.send(frame)
+                            cam.sleep_until_next_frame()
+                    break
+                except Exception as exc:
+                    self._log_msg(f"Cam {slot.index + 1}: {backend_name} '{device_name}': {exc}")
+                finally:
+                    if proc is not None and proc.poll() is None:
+                        proc.kill()
+                        proc.wait()
+            else:
+                slot.webcam_device = None
+                hint = (
+                    "install Unity Capture (github.com/schellingb/UnityCapture)"
+                    if slot.index > 0 else
+                    "install Unity Capture or enable OBS Virtual Camera"
+                )
+                self._log_msg(f"Cam {slot.index + 1}: no webcam backend — {hint}")
+                time.sleep(10)
+                continue
 
+            slot.webcam_device = None
             if not self.stopping:
                 time.sleep(3)
 
@@ -816,9 +846,13 @@ class Receiver:
                         slot.proc.kill()
                     except Exception:
                         pass
+        try:
+            self._log_file.close()
+        except Exception:
+            pass
         sys.exit(0)
 
-    def send_control(self, slot: SlotState, action: str) -> bool:
+    def send_control(self, slot: SlotState, action: str, params: Optional[dict] = None) -> bool:
         if not slot.ip:
             self._log_msg(f"Cam {slot.index + 1}: no phone address for remote control")
             return False
@@ -827,6 +861,7 @@ class Receiver:
             "action": action,
             "slotIndex": slot.index,
             "sentAt": time.time(),
+            **(params or {}),
         }).encode("utf-8")
         target = (slot.ip, slot.control_port or CONTROL_PORT)
         try:
@@ -892,11 +927,15 @@ class ReceiverApp(App[None]):
     }
     """
     BINDINGS = [
-        Binding("c",      "copy_obs_input", "Copy OBS", show=True),
-        Binding("l",      "cycle_lens", "Cycle lens", show=True),
-        Binding("k",      "kill_slot", "Kill slot", show=True),
-        Binding("q",      "quit_app",  "Quit",      show=True),
-        Binding("ctrl+c", "quit_app",  "Quit",      show=False),
+        Binding("c",      "copy_obs_input", "Copy OBS",  show=True),
+        Binding("s",      "copy_log",       "Copy log",  show=True),
+        Binding("l",      "cycle_lens",     "Lens",      show=True),
+        Binding("t",      "toggle_torch",   "Torch",     show=True),
+        Binding("z",      "zoom_in",        "Zoom+",     show=True),
+        Binding("shift+z","zoom_out",       "Zoom-",     show=True),
+        Binding("k",      "kill_slot",      "Kill slot", show=True),
+        Binding("q",      "quit_app",       "Quit",      show=True),
+        Binding("ctrl+c", "quit_app",       "Quit",      show=False),
     ]
 
     def __init__(self, receiver: Receiver) -> None:
@@ -978,8 +1017,8 @@ class ReceiverApp(App[None]):
         if self._receiver.args.ndi and self._receiver.ndi_available:
             obs.append(f"  NDI: Project-O-Camera-{s.index + 1}", style="cyan dim")
         if getattr(self._receiver.args, "webcam", False) and _VCAM_AVAILABLE:
-            vcam_name = "Unity Video Capture" if s.index == 0 else f"Unity Video Capture ({s.index})"
-            obs.append(f"  Webcam: {vcam_name}", style="magenta")
+            vcam_name = s.webcam_device or ("Unity Video Capture" if s.index == 0 else f"Unity Video Capture ({s.index})")
+            obs.append(f"  Webcam: {vcam_name}", style="magenta" if s.webcam_device else "magenta dim")
 
         st = s.ffmpeg_status
         if st == "listening":
@@ -990,6 +1029,11 @@ class ReceiverApp(App[None]):
             status = Text(st, style="red")
         else:
             status = Text(st, style="dim")
+        if s.connected:
+            if s.torch_on:
+                status.append("  🔦", style="yellow")
+            if s.zoom_level != 1.0:
+                status.append(f"  {s.zoom_level:.1f}x", style="cyan")
 
         return (dot, str(s.index + 1), dev, net, rtt, batt, thermal, obs, status)
 
@@ -1059,7 +1103,41 @@ class ReceiverApp(App[None]):
         if not slot.connected:
             self._receiver._log_msg(f"Cam {slot.index + 1}: phone is not connected")
             return
+        slot.zoom_level = 1.0
         self._receiver.send_control(slot, "cycleLens")
+
+    def action_toggle_torch(self) -> None:
+        slot = self._selected_slot()
+        if slot is None:
+            self._receiver._log_msg("Toggle torch: no camera row selected")
+            return
+        if not slot.connected:
+            self._receiver._log_msg(f"Cam {slot.index + 1}: phone is not connected")
+            return
+        slot.torch_on = not slot.torch_on
+        self._receiver.send_control(slot, "toggleTorch", {"torch": slot.torch_on})
+
+    def action_zoom_in(self) -> None:
+        slot = self._selected_slot()
+        if slot is None:
+            self._receiver._log_msg("Zoom in: no camera row selected")
+            return
+        if not slot.connected:
+            self._receiver._log_msg(f"Cam {slot.index + 1}: phone is not connected")
+            return
+        slot.zoom_level = min(8.0, round(slot.zoom_level + 0.5, 1))
+        self._receiver.send_control(slot, "setZoom", {"zoom": slot.zoom_level})
+
+    def action_zoom_out(self) -> None:
+        slot = self._selected_slot()
+        if slot is None:
+            self._receiver._log_msg("Zoom out: no camera row selected")
+            return
+        if not slot.connected:
+            self._receiver._log_msg(f"Cam {slot.index + 1}: phone is not connected")
+            return
+        slot.zoom_level = max(1.0, round(slot.zoom_level - 0.5, 1))
+        self._receiver.send_control(slot, "setZoom", {"zoom": slot.zoom_level})
 
     def action_copy_obs_input(self) -> None:
         slot = self._selected_slot()
@@ -1067,6 +1145,16 @@ class ReceiverApp(App[None]):
             self._receiver._log_msg("Copy OBS input: no camera row selected")
             return
         self._receiver.copy_obs_input(slot)
+
+    def action_copy_log(self) -> None:
+        with self._receiver._log_lock:
+            lines = [f"{ts} {msg}" for ts, msg in self._receiver._log]
+        text = "\n".join(lines)
+        try:
+            _copy_to_clipboard(text)
+            self._receiver._log_msg("Log copied to clipboard")
+        except Exception as e:
+            self._receiver._log_msg(f"Copy log failed: {e}")
 
     def action_kill_slot(self) -> None:
         slot = self._selected_slot()
