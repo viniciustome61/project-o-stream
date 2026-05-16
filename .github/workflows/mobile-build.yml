@@ -108,11 +108,24 @@ jobs:
           flutter pub get
 
       - name: Build debug APK
-        run: flutter build apk --debug
+        run: |
+          flutter build apk --debug --verbose 2>&1 | tail -300
+          # If flutter build didn't find the APK, try direct Gradle
+          if [ ! -f "build/app/outputs/flutter-apk/app-debug.apk" ]; then
+            echo "Flutter APK not at expected path, trying Gradle directly..."
+            cd android && ./gradlew assembleDebug --stacktrace 2>&1 | tail -200
+          fi
+
+      - name: Locate APK
+        run: |
+          echo "--- APK search ---"
+          find . -name "*.apk" -type f 2>/dev/null | head -10 || echo "No APK found"
 
       - name: Upload Android artifact
         uses: actions/upload-artifact@v7
         with:
           name: android-debug-apk
           if-no-files-found: error
-          path: build/app/outputs/flutter-apk/app-debug.apk
+          path: |
+            build/app/outputs/flutter-apk/app-debug.apk
+            android/app/build/outputs/apk/debug/app-debug.apk
