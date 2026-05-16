@@ -287,6 +287,56 @@ def _open_firewall(port: int, proto: str = "UDP") -> None:
 
 
 # ---------------------------------------------------------------------------
+# Unity Capture dynamic registration helpers
+# ---------------------------------------------------------------------------
+
+def _find_ucap_dlls() -> "tuple[Optional[str], Optional[str]]":
+    base = os.path.dirname(os.path.abspath(sys.argv[0]))
+    def _find(name: str) -> Optional[str]:
+        for d in [base, os.path.join(base, "UC", "Install")]:
+            p = os.path.join(d, name)
+            if os.path.isfile(p):
+                return p
+        return None
+    return _find("UnityCaptureFilter64.dll"), _find("UnityCaptureFilter32.dll")
+
+
+def _ucap_regsvr(dll64: str, dll32: Optional[str], extra_args: list) -> bool:
+    sys_root = os.environ.get("SystemRoot", r"C:\Windows")
+    reg64 = os.path.join(sys_root, "System32", "regsvr32.exe")
+    reg32 = os.path.join(sys_root, "SysWOW64", "regsvr32.exe")
+
+    def _run_one(exe: str, dll: str) -> bool:
+        proc = subprocess.Popen(
+            [exe, "/s"] + extra_args + [dll],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        try:
+            proc.wait(timeout=10)
+            return proc.returncode == 0
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            return False
+
+    try:
+        ok = _run_one(reg64, dll64)
+        if ok and dll32 and os.path.isfile(reg32):
+            _run_one(reg32, dll32)
+        return ok
+    except Exception:
+        return False
+
+
+def _ucap_register(dll64: str, dll32: Optional[str], count: int) -> bool:
+    return _ucap_regsvr(dll64, dll32, [f"/i:UnityCaptureDevices={count}"])
+
+
+def _ucap_unregister(dll64: str, dll32: Optional[str]) -> None:
+    _ucap_regsvr(dll64, dll32, ["/u"])
+
+
+# ---------------------------------------------------------------------------
 # Slot state
 # ---------------------------------------------------------------------------
 
@@ -391,6 +441,9 @@ class Receiver:
             grow_fn=self._grow_slot,
         )
 
+        self._dll64, self._dll32 = _find_ucap_dlls() if _VCAM_AVAILABLE else (None, None)
+        self._ucap_count   = 0
+
         self.ffmpeg_path   = args.ffmpeg or "ffmpeg"
         self.ndi_available = False
         if args.ndi and not args.direct_to_obs:
@@ -417,7 +470,27 @@ class Receiver:
         _open_firewall(slot.srt_port, "UDP")
         _open_firewall(slot.srt_port, "TCP")
         self._log_msg(f"Camera {i + 1} added automatically (SRT :{slot.srt_port} → UDP :{slot.obs_port})")
+        if self._dll64 and getattr(self.args, "webcam", False):
+            threading.Thread(
+                target=self._ensure_ucap_devices,
+                args=(i + 1,),
+                daemon=True,
+                name=f"ucap-reg-{i + 1}",
+            ).start()
         return i
+
+    def _ensure_ucap_devices(self, needed: int) -> None:
+        if not self._dll64 or not _VCAM_AVAILABLE:
+            return
+        if needed <= self._ucap_count:
+            return
+        self._log_msg(f"Unity Capture: registering {needed} device(s)...")
+        ok = _ucap_register(self._dll64, self._dll32, needed)
+        if ok:
+            self._ucap_count = needed
+            self._log_msg(f"Unity Capture: {needed} device(s) ready")
+        else:
+            self._log_msg("Unity Capture: registration failed — try running server.bat as admin")
 
     # ------------------------------------------------------------------ log
 
@@ -828,6 +901,14 @@ class Receiver:
     # ------------------------------------------------------------------ run / shutdown
 
     def run(self) -> None:
+        if self._dll64 and getattr(self.args, "webcam", False):
+            threading.Thread(
+                target=self._ensure_ucap_devices,
+                args=(self.args.cameras,),
+                daemon=True,
+                name="ucap-init",
+            ).start()
+
         if self.args.ndi:
             self._log_msg(
                 "NDI: enabled (libndi_newtek found)" if self.ndi_available
@@ -862,6 +943,10 @@ class Receiver:
                         slot.proc.kill()
                     except Exception:
                         pass
+        if self._dll64 and self._ucap_count > 0:
+            self._log_msg("Unity Capture: removing all devices...")
+            _ucap_unregister(self._dll64, self._dll32)
+            self._log_msg("Unity Capture: devices removed")
         try:
             self._log_file.close()
         except Exception:
@@ -959,6 +1044,7 @@ class ReceiverApp(App[None]):
         self._receiver    = receiver
         self._col_keys: list = []
         self._known_slots: set[int] = set()
+        self._last_action_t: dict[str, float] = {}
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -1111,7 +1197,16 @@ class ReceiverApp(App[None]):
             return slots[row_idx]
         return None
 
+    def _debounce(self, key: str, ms: int = 250) -> bool:
+        now = time.monotonic()
+        if now - self._last_action_t.get(key, 0.0) < ms / 1000:
+            return False
+        self._last_action_t[key] = now
+        return True
+
     def action_cycle_lens(self) -> None:
+        if not self._debounce("lens", 400):
+            return
         slot = self._selected_slot()
         if slot is None:
             self._receiver._log_msg("Cycle lens: no camera row selected")
@@ -1123,6 +1218,8 @@ class ReceiverApp(App[None]):
         self._receiver.send_control(slot, "cycleLens")
 
     def action_toggle_torch(self) -> None:
+        if not self._debounce("torch", 400):
+            return
         slot = self._selected_slot()
         if slot is None:
             self._receiver._log_msg("Toggle torch: no camera row selected")
@@ -1134,6 +1231,8 @@ class ReceiverApp(App[None]):
         self._receiver.send_control(slot, "toggleTorch", {"torch": slot.torch_on})
 
     def action_zoom_in(self) -> None:
+        if not self._debounce("zoom", 200):
+            return
         slot = self._selected_slot()
         if slot is None:
             self._receiver._log_msg("Zoom in: no camera row selected")
@@ -1145,6 +1244,8 @@ class ReceiverApp(App[None]):
         self._receiver.send_control(slot, "setZoom", {"zoom": slot.zoom_level})
 
     def action_zoom_out(self) -> None:
+        if not self._debounce("zoom", 200):
+            return
         slot = self._selected_slot()
         if slot is None:
             self._receiver._log_msg("Zoom out: no camera row selected")
