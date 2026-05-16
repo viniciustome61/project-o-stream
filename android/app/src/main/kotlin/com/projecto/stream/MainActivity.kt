@@ -26,7 +26,6 @@ import io.github.thibaultbee.streampack.core.streamers.single.AudioConfig
 import io.github.thibaultbee.streampack.core.streamers.single.SingleStreamer
 import io.github.thibaultbee.streampack.core.streamers.single.VideoConfig
 import io.github.thibaultbee.streampack.core.streamers.single.cameraSingleStreamer
-import io.github.thibaultbee.streampack.core.streamers.single.setCameraId
 import io.github.thibaultbee.streampack.ui.views.PreviewView
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -240,11 +239,14 @@ class StreamBridge(
         val normalized = normalizeLens(lens)
         val cameraId = cameraIdForLens(normalized)
             ?: error("The $normalized lens is not available on this Android device.")
-        val activeStreamer = requireStreamer()
-        activeStreamer.setCameraId(cameraId)
         selectedLens = normalized
         selectedCameraId = cameraId
-        previewView.setVideoSourceProvider(activeStreamer)
+        // StreamPack 3.x requires recreating the streamer to switch cameras.
+        if (live) streamer?.stopStream()
+        streamer = null
+        val newStreamer = cameraSingleStreamer(context = activity, cameraId = cameraId)
+        streamer = newStreamer
+        previewView.setVideoSourceProvider(newStreamer)
         emitStatus("Lens ${lensLabel(normalized)}", live)
     }
 
