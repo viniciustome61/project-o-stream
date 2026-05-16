@@ -291,7 +291,10 @@ def _open_firewall(port: int, proto: str = "UDP") -> None:
 # ---------------------------------------------------------------------------
 
 def _find_ucap_dlls() -> "tuple[Optional[str], Optional[str]]":
-    base = os.path.dirname(os.path.abspath(sys.argv[0]))
+    if getattr(sys, "frozen", False):
+        base = os.path.dirname(sys.executable)
+    else:
+        base = os.path.dirname(os.path.abspath(sys.argv[0]))
     def _find(name: str) -> Optional[str]:
         for d in [base, os.path.join(base, "UC", "Install")]:
             p = os.path.join(d, name)
@@ -326,7 +329,7 @@ def _ucap_regsvr(dll64: str, dll32: Optional[str], extra_args: list) -> "tuple[b
     try:
         rc32 = _run_one(reg32, os.path.basename(dll32)) if dll32 and os.path.isfile(dll32) else None
         rc64 = _run_one(reg64, os.path.basename(dll64))
-        detail = f"rc64={rc64}" + (f" rc32={rc32}" if rc32 is not None else "")
+        detail = f"rc64={rc64}({rc64:#010x})" + (f" rc32={rc32}({rc32:#010x})" if rc32 is not None else "")
         ok = (rc64 == 0) or (rc32 == 0)
         return ok, detail
     except Exception as e:
@@ -366,6 +369,7 @@ class SlotState:
         self.webcam_device: Optional[str]  = None
         self.zoom_level:    float          = 1.0
         self.torch_on:      bool           = False
+        self.relay_mode:    str            = "obs"  # "obs" | "srt" | "vcam" | "ndi"
 
     @property
     def connected(self) -> bool:
@@ -417,6 +421,10 @@ class SlotAssigner:
         with self._lock:
             self._table[ip] = (slot, time.time())
 
+    def remap(self, ip: str, new_slot: int) -> None:
+        with self._lock:
+            self._table[ip] = (new_slot, time.time())
+
 
 # ---------------------------------------------------------------------------
 # Receiver — data model + workers
@@ -435,11 +443,14 @@ class Receiver:
 
         self.slots: list[SlotState] = []
         for i in range(args.cameras):
-            self.slots.append(SlotState(
+            slot = SlotState(
                 index    = i,
                 srt_port = args.port + i * 3,
                 obs_port = args.obs_port + i * 3,
-            ))
+            )
+            if getattr(args, "webcam", False):
+                slot.relay_mode = "vcam"
+            self.slots.append(slot)
 
         self.assigner = SlotAssigner(
             slot_count_fn=lambda: len(self.slots),
@@ -471,6 +482,8 @@ class Receiver:
     def _grow_slot(self) -> int:
         i = len(self.slots)
         slot = SlotState(index=i, srt_port=self.args.port + i * 3, obs_port=self.args.obs_port + i * 3)
+        if getattr(self.args, "webcam", False):
+            slot.relay_mode = "vcam"
         self.slots.append(slot)
         _open_firewall(slot.srt_port, "UDP")
         _open_firewall(slot.srt_port, "TCP")
@@ -695,10 +708,32 @@ class Receiver:
             if slot_idx is None:
                 slot_idx = self.assigner.get(client_ip)
 
-            slot            = self.slots[slot_idx]
+            slot = self.slots[slot_idx]
+
+            # Hostname-based dedup: if another slot already owns this hostname,
+            # remap this IP to that canonical slot and evict the duplicate.
+            incoming_hostname = payload.get("hostname")
+            if incoming_hostname:
+                canonical = next(
+                    (s for s in self.slots
+                     if s.hostname == incoming_hostname and s.index != slot_idx),
+                    None,
+                )
+                if canonical is not None:
+                    self.assigner.remap(client_ip, canonical.index)
+                    # Evict the duplicate slot so it becomes available again.
+                    slot.ip = None
+                    slot.hostname = None
+                    slot.tele_ts = 0.0
+                    self._log_msg(
+                        f"Cam {slot_idx + 1}: duplicate IP {client_ip} remapped "
+                        f"to Cam {canonical.index + 1} ({incoming_hostname})"
+                    )
+                    slot = canonical
+
             slot.ip         = client_ip
             slot.transport  = payload.get("transport") or _infer_transport(client_ip)
-            slot.hostname   = payload.get("hostname") or slot.hostname
+            slot.hostname   = incoming_hostname or slot.hostname
             slot.lens       = payload.get("lens") or slot.lens
             control_port    = payload.get("controlPort")
             if isinstance(control_port, (int, float)) and not isinstance(control_port, bool):
@@ -713,7 +748,7 @@ class Receiver:
 
             batt_pct = f"{slot.battery*100:.0f}%" if slot.battery is not None else "?"
             self._log_msg(
-                f"Tele [{slot.hostname or client_ip}] "
+                f"Tele [Cam {slot.index + 1} {slot.hostname or client_ip}] "
                 f"batt={batt_pct} thermal={slot.thermal or '?'} rtt={slot.rtt_ms}ms"
             )
 
@@ -744,25 +779,48 @@ class Receiver:
         )
         obs_target    = f"udp://127.0.0.1:{slot.obs_port}?pkt_size=1316"
         webcam_target = f"udp://127.0.0.1:{slot.webcam_port}?pkt_size=1316"
+        srt_target    = (
+            f"srt://0.0.0.0:{slot.obs_port}"
+            f"?mode=listener&transtype=live&pkt_size=1316"
+        )
+
+        mode = slot.relay_mode
+        # Validate mode against available capabilities; fall back to "obs" if not possible.
+        if mode == "vcam" and not (getattr(self.args, "webcam", False) and _VCAM_AVAILABLE and self._dll64):
+            mode = "obs"
+        if mode == "ndi" and not (self.args.ndi and self.ndi_available):
+            mode = "obs"
+
         cmd = [
             self.ffmpeg_path,
             "-hide_banner", "-loglevel", "error",
             "-fflags", "nobuffer", "-flags", "low_delay",
             "-probesize", "32k", "-analyzeduration", "0",
             "-i", input_url,
-            "-map", "0", "-c", "copy", "-f", "mpegts", obs_target,
         ]
-        if getattr(self.args, "webcam", False):
-            # second output on dedicated port so webcam FFmpeg and OBS don't share a socket
+
+        if mode == "srt":
+            cmd += ["-map", "0", "-c", "copy", "-f", "mpegts", srt_target]
+        elif mode == "vcam":
+            # Only feed the webcam worker; OBS not needed in this mode.
             cmd += ["-map", "0", "-c", "copy", "-f", "mpegts", webcam_target]
-        if self.args.ndi and self.ndi_available:
+        elif mode == "ndi":
             ndi_name = f"Project-O-Camera-{slot.index + 1}"
             cmd += ["-map", "0", "-vf", "format=uyvy422", "-c:a", "pcm_s16le", "-f", "libndi_newtek", ndi_name]
+        else:
+            # "obs" — default UDP relay
+            cmd += ["-map", "0", "-c", "copy", "-f", "mpegts", obs_target]
+            if getattr(self.args, "webcam", False):
+                cmd += ["-map", "0", "-c", "copy", "-f", "mpegts", webcam_target]
+            if self.args.ndi and self.ndi_available:
+                ndi_name = f"Project-O-Camera-{slot.index + 1}"
+                cmd += ["-map", "0", "-vf", "format=uyvy422", "-c:a", "pcm_s16le", "-f", "libndi_newtek", ndi_name]
+
         return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
     def _relay_worker_slot(self, slot: SlotState) -> None:
         ndi_note = f" + NDI: Project-O-Camera-{slot.index + 1}" if (self.args.ndi and self.ndi_available) else ""
-        self._log_msg(f"Cam {slot.index + 1}: waiting on SRT :{slot.srt_port} -> UDP :{slot.obs_port}{ndi_note}")
+        self._log_msg(f"Cam {slot.index + 1}: waiting on SRT :{slot.srt_port} -> {self.obs_input_url(slot)}{ndi_note}")
         while not self.stopping:
             try:
                 t0 = time.time()
@@ -990,6 +1048,14 @@ class Receiver:
                 f"&latency={latency_us}&rcvlatency={latency_us}"
                 f"&peerlatency={latency_us}&tlpktdrop=1&pkt_size=1316"
             )
+        mode = slot.relay_mode
+        if mode == "srt":
+            return f"srt://127.0.0.1:{slot.obs_port}?mode=caller&pkt_size=1316"
+        if mode == "vcam":
+            name = slot.webcam_device or ("Unity Video Capture" if slot.index == 0 else f"Unity Video Capture ({slot.index})")
+            return f"Webcam: {name}"
+        if mode == "ndi":
+            return f"NDI: Project-O-Camera-{slot.index + 1}"
         return f"udp://127.0.0.1:{slot.obs_port}?pkt_size=1316"
 
     def copy_obs_input(self, slot: SlotState) -> bool:
@@ -1033,15 +1099,16 @@ class ReceiverApp(App[None]):
     }
     """
     BINDINGS = [
-        Binding("c",      "copy_obs_input", "Copy OBS",  show=True),
-        Binding("s",      "copy_log",       "Copy log",  show=True),
-        Binding("l",      "cycle_lens",     "Lens",      show=True),
-        Binding("t",      "toggle_torch",   "Torch",     show=True),
-        Binding("z",      "zoom_in",        "Zoom+",     show=True),
-        Binding("x",      "zoom_out",       "Zoom-",     show=True),
-        Binding("k",      "kill_slot",      "Kill slot", show=True),
-        Binding("q",      "quit_app",       "Quit",      show=True),
-        Binding("ctrl+c", "quit_app",       "Quit",      show=False),
+        Binding("c",      "copy_obs_input",    "Copy OBS",  show=True),
+        Binding("s",      "copy_log",          "Copy log",  show=True),
+        Binding("l",      "cycle_lens",        "Lens",      show=True),
+        Binding("t",      "toggle_torch",      "Torch",     show=True),
+        Binding("z",      "zoom_in",           "Zoom+",     show=True),
+        Binding("x",      "zoom_out",          "Zoom-",     show=True),
+        Binding("m",      "cycle_relay_mode",  "Mode",      show=True),
+        Binding("k",      "kill_slot",         "Kill slot", show=True),
+        Binding("q",      "quit_app",          "Quit",      show=True),
+        Binding("ctrl+c", "quit_app",          "Quit",      show=False),
     ]
 
     def __init__(self, receiver: Receiver) -> None:
@@ -1136,6 +1203,9 @@ class ReceiverApp(App[None]):
             status = Text(st, style="red")
         else:
             status = Text(st, style="dim")
+        if s.relay_mode != "obs":
+            mode_labels = {"srt": "[SRT]", "vcam": "[VCAM]", "ndi": "[NDI]"}
+            status.append(f"  {mode_labels.get(s.relay_mode, s.relay_mode.upper())}", style="cyan bold")
         if s.connected:
             if s.torch_on:
                 status.append("  🔦", style="yellow")
@@ -1260,6 +1330,30 @@ class ReceiverApp(App[None]):
             return
         slot.zoom_level = max(1.0, round(slot.zoom_level - 0.5, 1))
         self._receiver.send_control(slot, "setZoom", {"zoom": slot.zoom_level})
+
+    def action_cycle_relay_mode(self) -> None:
+        if not self._debounce("mode", 400):
+            return
+        slot = self._selected_slot()
+        if slot is None:
+            self._receiver._log_msg("Cycle mode: no camera row selected")
+            return
+        r = self._receiver
+        modes = ["obs"]
+        modes.append("srt")
+        if getattr(r.args, "webcam", False) and _VCAM_AVAILABLE and r._dll64:
+            modes.append("vcam")
+        if r.args.ndi and r.ndi_available:
+            modes.append("ndi")
+        cur = slot.relay_mode if slot.relay_mode in modes else "obs"
+        next_mode = modes[(modes.index(cur) + 1) % len(modes)]
+        slot.relay_mode = next_mode
+        if slot.proc and slot.proc.poll() is None:
+            try:
+                slot.proc.kill()
+            except Exception:
+                pass
+        r._log_msg(f"Cam {slot.index + 1}: mode → {next_mode}")
 
     def action_copy_obs_input(self) -> None:
         slot = self._selected_slot()
