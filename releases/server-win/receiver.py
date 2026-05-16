@@ -301,34 +301,39 @@ def _find_ucap_dlls() -> "tuple[Optional[str], Optional[str]]":
     return _find("UnityCaptureFilter64.dll"), _find("UnityCaptureFilter32.dll")
 
 
-def _ucap_regsvr(dll64: str, dll32: Optional[str], extra_args: list) -> bool:
+def _ucap_regsvr(dll64: str, dll32: Optional[str], extra_args: list) -> "tuple[bool, str]":
+    # Mirror UC's own InstallMultipleDevices.bat: CD to DLL dir, relative names, /s for silent.
+    dll_dir = os.path.dirname(dll64)
     sys_root = os.environ.get("SystemRoot", r"C:\Windows")
     reg64 = os.path.join(sys_root, "System32", "regsvr32.exe")
     reg32 = os.path.join(sys_root, "SysWOW64", "regsvr32.exe")
 
-    def _run_one(exe: str, dll: str) -> bool:
+    def _run_one(exe: str, dll_name: str) -> int:
         proc = subprocess.Popen(
-            [exe, "/s"] + extra_args + [dll],
+            [exe, "/s"] + extra_args + [dll_name],
+            cwd=dll_dir,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW,
         )
         try:
-            proc.wait(timeout=10)
-            return proc.returncode == 0
+            proc.wait(timeout=15)
+            return proc.returncode
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
-            return False
+            return -999  # timeout (not admin / UAC blocked)
 
     try:
-        ok = _run_one(reg64, dll64)
-        if ok and dll32 and os.path.isfile(reg32):
-            _run_one(reg32, dll32)
-        return ok
-    except Exception:
-        return False
+        rc32 = _run_one(reg32, os.path.basename(dll32)) if dll32 and os.path.isfile(dll32) else None
+        rc64 = _run_one(reg64, os.path.basename(dll64))
+        detail = f"rc64={rc64}" + (f" rc32={rc32}" if rc32 is not None else "")
+        ok = (rc64 == 0) or (rc32 == 0)
+        return ok, detail
+    except Exception as e:
+        return False, str(e)
 
 
-def _ucap_register(dll64: str, dll32: Optional[str], count: int) -> bool:
+def _ucap_register(dll64: str, dll32: Optional[str], count: int) -> "tuple[bool, str]":
     return _ucap_regsvr(dll64, dll32, [f"/i:UnityCaptureDevices={count}"])
 
 
@@ -485,12 +490,12 @@ class Receiver:
         if needed <= self._ucap_count:
             return
         self._log_msg(f"Unity Capture: registering {needed} device(s)...")
-        ok = _ucap_register(self._dll64, self._dll32, needed)
+        ok, detail = _ucap_register(self._dll64, self._dll32, needed)
         if ok:
             self._ucap_count = needed
-            self._log_msg(f"Unity Capture: {needed} device(s) ready")
+            self._log_msg(f"Unity Capture: {needed} device(s) ready ({detail})")
         else:
-            self._log_msg("Unity Capture: registration failed — try running server.bat as admin")
+            self._log_msg(f"Unity Capture: registration failed ({detail}) — run server.bat as admin")
 
     # ------------------------------------------------------------------ log
 
