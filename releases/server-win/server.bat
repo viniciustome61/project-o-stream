@@ -19,39 +19,26 @@ if not exist "%DLL32%" set "DLL32=%~dp0UC\Install\UnityCaptureFilter32.dll"
 
 if not exist "%DLL64%" goto no_vcam
 
+:: ---- Require admin for Unity Capture dynamic registration ----
+net session >nul 2>&1
+if %errorlevel% neq 0 (
+    echo [Unity Capture] Requesting administrator access...
+    powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -ArgumentList '%*' -Verb RunAs"
+    exit /b
+)
+
 :: ---- Python vcam deps (script mode only) ----
-if exist "%~dp0server.exe" goto vcam_reg
+if exist "%~dp0server.exe" goto vcam_unblock
 python -c "import pyvirtualcam, numpy" >nul 2>&1
 if %errorlevel% neq 0 python -m pip install pyvirtualcam numpy --quiet
 
-:: ---- Register Unity Capture DLLs + create 4 virtual devices ----
-:vcam_reg
+:: ---- Unblock DLLs (SmartScreen / download mark) ----
+:vcam_unblock
 powershell -NoProfile -Command "Unblock-File -Path '%DLL64%' -ErrorAction SilentlyContinue"
 if exist "%DLL32%" powershell -NoProfile -Command "Unblock-File -Path '%DLL32%' -ErrorAction SilentlyContinue"
 
-set "VCAM_OK=0"
-%SystemRoot%\System32\regsvr32.exe /s /i:"UnityCaptureDevices=4" "%DLL64%" >nul 2>&1
-if %errorlevel% equ 0 set "VCAM_OK=1"
-if exist "%DLL32%" %SystemRoot%\SysWOW64\regsvr32.exe /s /i:"UnityCaptureDevices=4" "%DLL32%" >nul 2>&1
+:: Registration is handled dynamically by receiver.py on start/stop.
 
-if "%VCAM_OK%"=="1" goto vcam_ok
-
-:: Non-elevated registration failed - create a temp script and elevate it
-echo @echo off > "%TEMP%\uc_register.bat"
-echo "%SystemRoot%\System32\regsvr32.exe" /s /i:"UnityCaptureDevices=4" "%DLL64%" >> "%TEMP%\uc_register.bat"
-if exist "%DLL32%" echo "%SystemRoot%\SysWOW64\regsvr32.exe" /s /i:"UnityCaptureDevices=4" "%DLL32%" >> "%TEMP%\uc_register.bat"
-powershell -NoProfile -Command "Start-Process '%TEMP%\uc_register.bat' -Verb RunAs -Wait" >nul 2>&1
-del "%TEMP%\uc_register.bat" >nul 2>&1
-
-:: Verify elevation succeeded
-set "VCAM_OK=0"
-%SystemRoot%\System32\regsvr32.exe /s /i:"UnityCaptureDevices=4" "%DLL64%" >nul 2>&1
-if %errorlevel% equ 0 set "VCAM_OK=1"
-if "%VCAM_OK%"=="0" echo [warn] Unity Capture registration failed.
-if "%VCAM_OK%"=="0" echo [warn] If virtual webcam is missing, install VC++ 2022 x64:
-if "%VCAM_OK%"=="0" echo [warn]   https://aka.ms/vs/17/release/vc_redist.x64.exe
-
-:vcam_ok
 if exist "%~dp0server.exe" goto run_exe_vcam
 python "%~dp0receiver.py" --cameras 4 --webcam %*
 goto end
