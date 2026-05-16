@@ -24,28 +24,28 @@ if exist "%~dp0server.exe" goto vcam_reg
 python -c "import pyvirtualcam, numpy" >nul 2>&1
 if %errorlevel% neq 0 python -m pip install pyvirtualcam numpy --quiet
 
-:: ---- Register Unity Capture DLLs ----
+:: ---- Register Unity Capture DLLs + create 4 virtual devices ----
 :vcam_reg
 powershell -NoProfile -Command "Unblock-File -Path '%DLL64%' -ErrorAction SilentlyContinue"
 if exist "%DLL32%" powershell -NoProfile -Command "Unblock-File -Path '%DLL32%' -ErrorAction SilentlyContinue"
 
 set "VCAM_OK=0"
-%SystemRoot%\System32\regsvr32.exe /s "%DLL64%" >nul 2>&1
+%SystemRoot%\System32\regsvr32.exe /s /i:"UnityCaptureDevices=4" "%DLL64%" >nul 2>&1
 if %errorlevel% equ 0 set "VCAM_OK=1"
-if exist "%DLL32%" %SystemRoot%\SysWOW64\regsvr32.exe /s "%DLL32%" >nul 2>&1
+if exist "%DLL32%" %SystemRoot%\SysWOW64\regsvr32.exe /s /i:"UnityCaptureDevices=4" "%DLL32%" >nul 2>&1
 
 if "%VCAM_OK%"=="1" goto vcam_ok
 
 :: Non-elevated registration failed - create a temp script and elevate it
 echo @echo off > "%TEMP%\uc_register.bat"
-echo "%SystemRoot%\System32\regsvr32.exe" /s "%DLL64%" >> "%TEMP%\uc_register.bat"
-if exist "%DLL32%" echo "%SystemRoot%\SysWOW64\regsvr32.exe" /s "%DLL32%" >> "%TEMP%\uc_register.bat"
+echo "%SystemRoot%\System32\regsvr32.exe" /s /i:"UnityCaptureDevices=4" "%DLL64%" >> "%TEMP%\uc_register.bat"
+if exist "%DLL32%" echo "%SystemRoot%\SysWOW64\regsvr32.exe" /s /i:"UnityCaptureDevices=4" "%DLL32%" >> "%TEMP%\uc_register.bat"
 powershell -NoProfile -Command "Start-Process '%TEMP%\uc_register.bat' -Verb RunAs -Wait" >nul 2>&1
 del "%TEMP%\uc_register.bat" >nul 2>&1
 
 :: Verify elevation succeeded
 set "VCAM_OK=0"
-%SystemRoot%\System32\regsvr32.exe /s "%DLL64%" >nul 2>&1
+%SystemRoot%\System32\regsvr32.exe /s /i:"UnityCaptureDevices=4" "%DLL64%" >nul 2>&1
 if %errorlevel% equ 0 set "VCAM_OK=1"
 if "%VCAM_OK%"=="0" echo [warn] Unity Capture registration failed.
 if "%VCAM_OK%"=="0" echo [warn] If virtual webcam is missing, install VC++ 2022 x64:
