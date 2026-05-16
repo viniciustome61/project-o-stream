@@ -435,8 +435,19 @@ class _SenderScreenState extends State<SenderScreen> {
           _dbg('Remote lens cycle ignored while busy');
           return;
         }
-        _dbg('Remote lens cycle requested by ${datagram.address.address}');
+        _dbg('Remote lens cycle by ${datagram.address.address}');
         await _switchCamera();
+      } else if (action == 'toggleTorch') {
+        if (_busy) return;
+        _dbg('Remote torch toggle by ${datagram.address.address}');
+        await _toggleTorch();
+      } else if (action == 'setZoom') {
+        if (_busy) return;
+        final zoom = (payload['zoom'] as num?)?.toDouble();
+        if (zoom != null) {
+          _dbg('Remote zoom ${zoom.toStringAsFixed(1)}x by ${datagram.address.address}');
+          await _setZoom(zoom.clamp(1.0, 8.0));
+        }
       }
     } catch (error) {
       _dbg('Remote control parse failed: $error');
@@ -1118,7 +1129,9 @@ class _SettingsPanel extends StatelessWidget {
   }
 
   Widget _buildHeader(BuildContext context) {
-    return Row(
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Row(
       children: [
         Container(
           padding: const EdgeInsets.all(8),
@@ -1186,6 +1199,7 @@ class _SettingsPanel extends StatelessWidget {
           ),
         ),
       ],
+      ),
     );
   }
 
