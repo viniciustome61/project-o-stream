@@ -93,11 +93,32 @@ class _SenderScreenState extends State<SenderScreen> {
   bool _settingsExpanded = true;
   int _versionTaps = 0;
 
+  final Set<String> _liveStatusKeywords = {
+    'live',
+    'searching',
+    'receiver',
+    'discovery',
+    'stream',
+    'error',
+    'failed',
+    'unavailable',
+  };
+
   void _dbg(String msg) {
     final ts = DateTime.now().toIso8601String().substring(11, 23);
     // ignore: avoid_print
     debugPrint('[PO-dart $ts] $msg');
     if (mounted) setState(() => _log.add('$ts $msg'));
+  }
+
+  bool _isLiveStatusMessage(String status) {
+    return _liveStatusKeywords.any(
+      (keyword) => status.toLowerCase().contains(keyword),
+    );
+  }
+
+  String _getDisplayStatus(String status) {
+    return _isLiveStatusMessage(status) ? status : '';
   }
   // ───────────────────────────────────────────────────────────────
 
@@ -566,12 +587,10 @@ class _SenderScreenState extends State<SenderScreen> {
         _config = _config.copyWith(lens: lens);
         _torch = false;
         _zoom = 1;
-        _status = 'Lens ${_lensLabel(lens)}';
       });
     } catch (error) {
       setState(() {
         _config = _config.copyWith(lens: previousLens);
-        _status = 'Lens switch failed: $error';
       });
     }
   }
@@ -587,12 +606,10 @@ class _SenderScreenState extends State<SenderScreen> {
       }
       setState(() {
         _torch = next;
-        _status = next ? 'Torch on' : 'Torch off';
       });
     } catch (error) {
       setState(() {
         _torch = false;
-        _status = 'Torch failed: $error';
       });
     }
   }
@@ -602,7 +619,6 @@ class _SenderScreenState extends State<SenderScreen> {
     setState(() {
       _busy = true;
       _live = false;
-      _status = 'Applying...';
     });
     try {
       await NativeStreamer.stopStream();
@@ -642,16 +658,6 @@ class _SenderScreenState extends State<SenderScreen> {
     }
   }
 
-  Future<void> _capturePhoto() async {
-    if (_busy || _live) return;
-    await context.read<CameraState>().captureAndSave();
-    if (!mounted) return;
-    final error = context.read<CameraState>().error;
-    setState(
-      () => _status = error == null ? 'Photo saved' : 'Photo failed: $error',
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -685,7 +691,7 @@ class _SenderScreenState extends State<SenderScreen> {
             child: Column(
               children: [
                 _TopBar(
-                  status: _status,
+                  status: _getDisplayStatus(_status),
                   live: _live,
                   stats: _stats,
                   version: AppMetadata.version,
@@ -764,12 +770,6 @@ class _SenderScreenState extends State<SenderScreen> {
                       ),
                     ],
                   ),
-                ),
-                IconButton.filledTonal(
-                  onPressed:
-                      _busy || _live ? null : () => unawaited(_capturePhoto()),
-                  icon: const Icon(Icons.photo_camera),
-                  tooltip: 'Capture photo',
                 ),
                 Slider(
                   value: _zoom,
@@ -1073,35 +1073,41 @@ class _SettingsPanel extends StatelessWidget {
             constraints: BoxConstraints(
               maxHeight: expanded ? maxPanelHeight : 140,
             ),
-            child: SingleChildScrollView(
+            child: Padding(
               padding: const EdgeInsets.all(12),
-              physics: expanded
-                  ? const BouncingScrollPhysics()
-                  : const NeverScrollableScrollPhysics(),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   _buildHeader(context),
                   if (!expanded) _buildMiniStatus(context),
-                  if (expanded) ...[
-                    const Divider(height: 22, color: Colors.white10),
-                    _buildSectionTitle('QUALITY'),
-                    _buildProfileSelector(),
-                    const SizedBox(height: 12),
-                    _buildSectionTitle('LENS'),
-                    _buildLensSelector(),
-                    const SizedBox(height: 12),
-                    _buildSectionTitle('TRANSPORT'),
-                    _buildLatencySlider(),
-                    const SizedBox(height: 12),
-                    _buildSectionTitle('HARDWARE'),
-                    _buildHardwareToggles(),
-                    const SizedBox(height: 12),
-                    _buildSectionTitle('SYSTEM'),
-                    _buildSystemToggles(),
-                    const SizedBox(height: 12),
-                    _buildCapabilitiesFooter(context),
-                  ],
+                  if (expanded)
+                    Flexible(
+                      child: SingleChildScrollView(
+                        physics: const BouncingScrollPhysics(),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Divider(height: 22, color: Colors.white10),
+                            _buildSectionTitle('QUALITY'),
+                            _buildProfileSelector(),
+                            const SizedBox(height: 12),
+                            _buildSectionTitle('LENS'),
+                            _buildLensSelector(),
+                            const SizedBox(height: 12),
+                            _buildSectionTitle('TRANSPORT'),
+                            _buildLatencySlider(),
+                            const SizedBox(height: 12),
+                            _buildSectionTitle('HARDWARE'),
+                            _buildHardwareToggles(),
+                            const SizedBox(height: 12),
+                            _buildSectionTitle('SYSTEM'),
+                            _buildSystemToggles(),
+                            const SizedBox(height: 12),
+                            _buildCapabilitiesFooter(context),
+                          ],
+                        ),
+                      ),
+                    ),
                 ],
               ),
             ),
