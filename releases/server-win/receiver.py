@@ -25,6 +25,13 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.widgets import DataTable, Footer, Header, RichLog
 
+try:
+    import numpy as _np
+    import pyvirtualcam as _pvc
+    _VCAM_AVAILABLE = True
+except ImportError:
+    _VCAM_AVAILABLE = False
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -86,6 +93,11 @@ def _lan_ips() -> list[str]:
     _add_lan_candidate(ips, _default_route_ip())
     for ip in _windows_lan_ips():
         _add_lan_candidate(ips, ip)
+    # Windows Mobile Hotspot/ICS commonly binds the host to 192.168.137.1.
+    # Keep it as a low-priority candidate because some Windows builds do not
+    # expose the hotspot adapter through the normal address query quickly.
+    if os.name == "nt":
+        _add_lan_candidate(ips, "192.168.137.1")
     try:
         for result in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
             _add_lan_candidate(ips, result[4][0])
@@ -158,6 +170,49 @@ def _best_lan_ip_for_client(client_ip: str, lan_ips: list[str]) -> Optional[str]
         if _same_lan_layer(client_ip, lan_ip):
             return lan_ip
     return lan_ips[0] if lan_ips else None
+
+
+def _directed_broadcast(ip: str) -> Optional[str]:
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return None
+    if addr.version != 4 or not _is_lan_ip(ip):
+        return None
+    parts = ip.split(".")
+    if len(parts) != 4:
+        return None
+    return f"{parts[0]}.{parts[1]}.{parts[2]}.255"
+
+
+def _lan_offer_targets(lan_ips: list[str]) -> list[tuple[str, str]]:
+    targets: list[tuple[str, str]] = []
+
+    def add(host: str, lan_ip: str) -> None:
+        target = (host, lan_ip)
+        if target not in targets:
+            targets.append(target)
+
+    for lan_ip in lan_ips:
+        broadcast = _directed_broadcast(lan_ip)
+        if broadcast:
+            add(broadcast, lan_ip)
+        add("255.255.255.255", lan_ip)
+    return targets
+
+
+def _copy_to_clipboard(text: str) -> None:
+    if os.name == "nt":
+        subprocess.run(["clip"], input=text, text=True, check=True, timeout=2)
+        return
+
+    for cmd in (["pbcopy"], ["wl-copy"], ["xclip", "-selection", "clipboard"]):
+        try:
+            subprocess.run(cmd, input=text, text=True, check=True, timeout=2)
+            return
+        except Exception:
+            continue
+    raise RuntimeError("No clipboard command found")
 
 
 def _advertise_host(probe_source_ip: str, lan_ips: list[str], tailscale_ip: Optional[str]) -> str:
@@ -314,8 +369,9 @@ class Receiver:
         self.start_ts = time.time()
         self.stopping = False
 
-        self.lan_ips      = _lan_ips()
-        self.lan_ip       = self.lan_ips[0] if self.lan_ips else _lan_ip()
+        self.lan_ips: list[str] = []
+        self.lan_ip = "127.0.0.1"
+        self._refresh_lan_ips()
         self.tailscale_ip = _tailscale_ip()
 
         self.slots: list[SlotState] = []
@@ -373,12 +429,21 @@ class Receiver:
 
     # ------------------------------------------------------------------ workers
 
-    def _discovery_offer(self, client_ip: str, hostname: str) -> tuple[dict[str, object], int]:
-        slot_idx = self.assigner.get(client_ip)
+    def _refresh_lan_ips(self) -> None:
+        lan_ips = _lan_ips()
+        if lan_ips:
+            self.lan_ips = lan_ips
+            self.lan_ip = lan_ips[0]
+
+    def _slot_offer(
+        self,
+        slot_idx: int,
+        advertise_host: str,
+        hostname: str,
+        lan_ip: Optional[str],
+    ) -> dict[str, object]:
         slot = self.slots[slot_idx]
-        lan_ip = _best_lan_ip_for_client(client_ip, self.lan_ips)
-        advertise_host = _advertise_host(client_ip, self.lan_ips, self.tailscale_ip)
-        offer = {
+        return {
             "service":     "project-o-stream",
             "host":        advertise_host,
             "hostname":    hostname,
@@ -391,7 +456,13 @@ class Receiver:
             "slotIndex":   slot_idx,
             "totalSlots":  len(self.slots),
         }
-        return offer, slot_idx
+
+    def _discovery_offer(self, client_ip: str, hostname: str) -> tuple[dict[str, object], int]:
+        self._refresh_lan_ips()
+        slot_idx = self.assigner.get(client_ip)
+        lan_ip = _best_lan_ip_for_client(client_ip, self.lan_ips)
+        advertise_host = _advertise_host(client_ip, self.lan_ips, self.tailscale_ip)
+        return self._slot_offer(slot_idx, advertise_host, hostname, lan_ip), slot_idx
 
     def _discovery_worker(self) -> None:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -448,6 +519,33 @@ class Receiver:
                     else:
                         self._log_msg(f"Slot {slot_idx + 1} assigned to {client_ip} (SRT :{slot.srt_port})")
 
+        sock.close()
+
+    def _lan_offer_worker(self) -> None:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        hostname = socket.gethostname()
+        last_target_label = ""
+        while not self.stopping:
+            self._refresh_lan_ips()
+            targets = _lan_offer_targets(self.lan_ips)
+            target_label = ", ".join(host for host, _ in targets)
+            if target_label and target_label != last_target_label:
+                self._log_msg(
+                    "LAN/hotspot backup offers on UDP "
+                    f"{DISC_PUSH_PORT}: {target_label}"
+                )
+                last_target_label = target_label
+            for host, lan_ip in targets:
+                offer = self._slot_offer(0, lan_ip, hostname, lan_ip)
+                try:
+                    sock.sendto(json.dumps(offer).encode(), (host, DISC_PUSH_PORT))
+                except Exception:
+                    continue
+            for _ in range(10):
+                if self.stopping:
+                    break
+                time.sleep(0.1)
         sock.close()
 
     def _tailnet_offer_worker(self) -> None:
@@ -533,6 +631,21 @@ class Receiver:
 
         sock.close()
 
+    def _start_webcam_ffmpeg(self, slot: SlotState, w: int, h: int, fps: int) -> "subprocess.Popen[bytes]":
+        """Decode the relay UDP stream to raw RGB24 frames piped to stdout."""
+        input_url = f"udp://127.0.0.1:{slot.obs_port}?pkt_size=1316"
+        cmd = [
+            self.ffmpeg_path,
+            "-hide_banner", "-loglevel", "error",
+            "-fflags", "nobuffer+discardcorrupt",
+            "-probesize", "32k", "-analyzeduration", "0",
+            "-i", input_url,
+            "-vf", f"scale={w}:{h}:flags=bilinear,format=rgb24",
+            "-an", "-f", "rawvideo", "-r", str(fps),
+            "pipe:1",
+        ]
+        return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+
     def _start_ffmpeg(self, slot: SlotState) -> "subprocess.Popen[bytes]":
         latency_us = self.args.latency * 1000
         input_url  = (
@@ -585,8 +698,66 @@ class Receiver:
                 self._log_msg(f"Cam {slot.index + 1}: relay error: {e}")
                 time.sleep(3)
 
+    def _webcam_worker_slot(self, slot: SlotState) -> None:
+        if not _VCAM_AVAILABLE:
+            self._log_msg("Webcam: pip install pyvirtualcam numpy to enable")
+            return
+
+        w   = self.args.webcam_width
+        h   = self.args.webcam_height
+        fps = self.args.webcam_fps
+        frame_bytes = w * h * 3
+        device = "Unity Video Capture" if slot.index == 0 else f"Unity Video Capture ({slot.index})"
+
+        self._log_msg(f"Cam {slot.index + 1}: webcam '{device}' {w}x{h}@{fps}fps")
+
+        while not self.stopping:
+            # Wait for the relay FFmpeg to be running before reading from its UDP port.
+            waited = 0
+            while not (slot.proc and slot.proc.poll() is None):
+                if self.stopping:
+                    return
+                time.sleep(0.5)
+                waited += 1
+                if waited >= 60:
+                    self._log_msg(f"Cam {slot.index + 1}: webcam waiting for relay...")
+                    waited = 0
+
+            if self.stopping:
+                return
+
+            proc: Optional[subprocess.Popen] = None  # type: ignore[type-arg]
+            try:
+                proc = self._start_webcam_ffmpeg(slot, w, h, fps)
+                with _pvc.Camera(
+                    width=w, height=h, fps=fps,
+                    fmt=_pvc.PixelFormat.RGB,
+                    device=device,
+                    backend="unitycapture",
+                    print_fps=False,
+                ) as cam:
+                    self._log_msg(f"Cam {slot.index + 1}: webcam live on '{cam.device}'")
+                    while not self.stopping and proc.poll() is None:
+                        raw = proc.stdout.read(frame_bytes)  # type: ignore[union-attr]
+                        if len(raw) < frame_bytes:
+                            break
+                        frame = _np.frombuffer(raw, dtype=_np.uint8).reshape((h, w, 3))
+                        cam.send(frame)
+                        cam.sleep_until_next_frame()
+            except Exception as exc:
+                self._log_msg(f"Cam {slot.index + 1}: vcam '{device}' error: {exc}")
+            finally:
+                if proc is not None and proc.poll() is None:
+                    proc.kill()
+                    proc.wait()
+
+            if not self.stopping:
+                time.sleep(3)
+
     def _relay_worker(self) -> None:
         if self.args.direct_to_obs:
+            if getattr(self.args, "webcam", False):
+                self._log_msg("Webcam output not available in --direct-to-obs mode")
             return
         started: set[int] = set()
         while not self.stopping:
@@ -599,6 +770,13 @@ class Receiver:
                         daemon=True,
                         name=f"relay-{slot.index}",
                     ).start()
+                    if getattr(self.args, "webcam", False):
+                        threading.Thread(
+                            target=self._webcam_worker_slot,
+                            args=(slot,),
+                            daemon=True,
+                            name=f"webcam-{slot.index}",
+                        ).start()
             time.sleep(0.5)
 
     # ------------------------------------------------------------------ run / shutdown
@@ -612,6 +790,7 @@ class Receiver:
 
         for target, name in [
             (self._discovery_worker, "discovery"),
+            (self._lan_offer_worker, "lan-offers"),
             (self._tailnet_offer_worker, "tailnet-offers"),
             (self._telemetry_worker, "telemetry"),
             (self._relay_worker,     "relay"),
@@ -661,6 +840,27 @@ class Receiver:
             self._log_msg(f"Cam {slot.index + 1}: remote {action} failed: {e}")
             return False
 
+    def obs_input_url(self, slot: SlotState) -> str:
+        if self.args.direct_to_obs:
+            latency_us = self.args.latency * 1000
+            return (
+                f"srt://0.0.0.0:{slot.srt_port}"
+                f"?mode=listener&transtype=live"
+                f"&latency={latency_us}&rcvlatency={latency_us}"
+                f"&peerlatency={latency_us}&tlpktdrop=1&pkt_size=1316"
+            )
+        return f"udp://127.0.0.1:{slot.obs_port}?pkt_size=1316"
+
+    def copy_obs_input(self, slot: SlotState) -> bool:
+        url = self.obs_input_url(slot)
+        try:
+            _copy_to_clipboard(url)
+            self._log_msg(f"Cam {slot.index + 1}: copied OBS input: {url}")
+            return True
+        except Exception as e:
+            self._log_msg(f"Cam {slot.index + 1}: clipboard copy failed: {e}")
+            return False
+
 
 # ---------------------------------------------------------------------------
 # Textual TUI
@@ -692,6 +892,7 @@ class ReceiverApp(App[None]):
     }
     """
     BINDINGS = [
+        Binding("c",      "copy_obs_input", "Copy OBS", show=True),
         Binding("l",      "cycle_lens", "Cycle lens", show=True),
         Binding("k",      "kill_slot", "Kill slot", show=True),
         Binding("q",      "quit_app",  "Quit",      show=True),
@@ -772,10 +973,13 @@ class ReceiverApp(App[None]):
             thermal = Text("—", style="dim")
 
         obs = Text()
-        obs.append(f"udp://127.0.0.1:{s.obs_port}",
-                   style="green" if s.connected else "dim")
+        obs.append(self._receiver.obs_input_url(s),
+                   style="green" if (s.connected or self._receiver.args.direct_to_obs) else "dim")
         if self._receiver.args.ndi and self._receiver.ndi_available:
             obs.append(f"  NDI: Project-O-Camera-{s.index + 1}", style="cyan dim")
+        if getattr(self._receiver.args, "webcam", False) and _VCAM_AVAILABLE:
+            vcam_name = "Unity Video Capture" if s.index == 0 else f"Unity Video Capture ({s.index})"
+            obs.append(f"  Webcam: {vcam_name}", style="magenta")
 
         st = s.ffmpeg_status
         if st == "listening":
@@ -813,9 +1017,12 @@ class ReceiverApp(App[None]):
         hrs, rem  = divmod(total_s, 3600)
         mins, sec = divmod(rem, 60)
         uptime    = f"{hrs:02d}:{mins:02d}:{sec:02d}"
+        webcam_on = getattr(r.args, "webcam", False) and _VCAM_AVAILABLE
         mode      = (
-            "direct-to-OBS" if r.args.direct_to_obs else
-            "relay→OBS+NDI"  if (r.args.ndi and r.ndi_available) else
+            "direct-to-OBS"    if r.args.direct_to_obs else
+            "relay+webcam+NDI" if (webcam_on and r.args.ndi and r.ndi_available) else
+            "relay+webcam"     if webcam_on else
+            "relay→OBS+NDI"    if (r.args.ndi and r.ndi_available) else
             "relay→OBS"
         )
         lan_label = r.lan_ip
@@ -854,6 +1061,13 @@ class ReceiverApp(App[None]):
             return
         self._receiver.send_control(slot, "cycleLens")
 
+    def action_copy_obs_input(self) -> None:
+        slot = self._selected_slot()
+        if slot is None:
+            self._receiver._log_msg("Copy OBS input: no camera row selected")
+            return
+        self._receiver.copy_obs_input(slot)
+
     def action_kill_slot(self) -> None:
         slot = self._selected_slot()
         if slot is not None:
@@ -882,9 +1096,18 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--obs-port",      type=int,  default=15000, metavar="PORT")
     p.add_argument("--latency",       type=int,  default=80,    metavar="MS")
     p.add_argument("--ffmpeg",        type=str,  default=None,  metavar="PATH")
-    p.add_argument("--direct-to-obs", action="store_true")
-    p.add_argument("--ndi",           action="store_true")
-    return p.parse_args()
+    p.add_argument("--direct-to-obs",  action="store_true")
+    p.add_argument("--relay-to-obs",   action="store_true")
+    p.add_argument("--ndi",            action="store_true")
+    p.add_argument("--webcam",         action="store_true",
+                   help="Output each slot as a virtual webcam (Unity Capture driver required)")
+    p.add_argument("--webcam-width",   type=int, default=1280, metavar="PX")
+    p.add_argument("--webcam-height",  type=int, default=720,  metavar="PX")
+    p.add_argument("--webcam-fps",     type=int, default=30,   metavar="FPS")
+    args = p.parse_args()
+    if args.relay_to_obs:
+        args.direct_to_obs = False
+    return args
 
 
 if __name__ == "__main__":

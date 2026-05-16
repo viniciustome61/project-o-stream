@@ -17,13 +17,22 @@ if ($tailscale) {
 }
 
 $script:lanIps = @()
-try {
-    $script:lanIps = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-        Where-Object {
-            $_.IPAddress -notmatch '^(127\.|169\.254\.|100\.)'
-        } | Sort-Object InterfaceMetric,PrefixLength | Select-Object -ExpandProperty IPAddress -Unique)
-} catch { }
-$lanIp = if ($script:lanIps.Count -gt 0) { [string]$script:lanIps[0] } else { $null }
+$lanIp = $null
+
+function Update-LanIps {
+    try {
+        $script:lanIps = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.IPAddress -notmatch '^(127\.|169\.254\.|100\.)'
+            } | Sort-Object InterfaceMetric,PrefixLength | Select-Object -ExpandProperty IPAddress -Unique)
+    } catch { $script:lanIps = @() }
+    if ($script:lanIps -notcontains "192.168.137.1") {
+        $script:lanIps += "192.168.137.1"
+    }
+    $script:lanIp = if ($script:lanIps.Count -gt 0) { [string]$script:lanIps[0] } else { $null }
+}
+
+Update-LanIps
 
 $udp = [System.Net.Sockets.UdpClient]::new($DiscoveryPort)
 $udp.EnableBroadcast = $true
@@ -121,6 +130,7 @@ function Get-BestLanIpForClient {
 
 function New-DiscoveryPayload {
     param([string]$ProbeSourceIp)
+    Update-LanIps
     $slot = Get-SlotForPhone -PhoneIp $ProbeSourceIp
     $lanAdvertiseHost = Get-BestLanIpForClient -ClientIp $ProbeSourceIp
 
@@ -173,11 +183,38 @@ function Send-OffersToPeers {
     }
 }
 
+function Get-LanOfferTargets {
+    Update-LanIps
+    $targets = @()
+    foreach ($ip in $script:lanIps) {
+        $parts = ([string]$ip).Split('.')
+        if ($parts.Count -ne 4) { continue }
+        $targets += [pscustomobject]@{
+            Host  = "$($parts[0]).$($parts[1]).$($parts[2]).255"
+            LanIp = [string]$ip
+        }
+        $targets += [pscustomobject]@{
+            Host  = "255.255.255.255"
+            LanIp = [string]$ip
+        }
+    }
+    $targets | Sort-Object Host,LanIp -Unique
+}
+
+function Send-OffersToLan {
+    foreach ($target in (Get-LanOfferTargets)) {
+        $payload = [System.Text.Encoding]::UTF8.GetBytes((New-DiscoveryPayload -ProbeSourceIp $target.LanIp))
+        try { [void]$pulseUdp.Send($payload, $payload.Length, $target.Host, $ClientDiscoveryPort) }
+        catch { continue }
+    }
+}
+
 $slotCount = $slots.Count
 Write-Host "Discovery listening on UDP 0.0.0.0:$DiscoveryPort ($slotCount slot$(if ($slotCount -gt 1) {'s'}))"
 if ($lanIp)       { Write-Host "LAN IPs      : $($script:lanIps -join ', ')" }
 if ($tailscaleIp) { Write-Host "Tailscale IP : $tailscaleIp" }
 if ($conflictUdp) { Write-Host "Conflict detection active on UDP $ClientDiscoveryPort" }
+if ($lanIp)       { Write-Host "LAN offers   : UDP $ClientDiscoveryPort broadcast pulses enabled" }
 
 $shouldStop = $false
 try {
@@ -234,6 +271,7 @@ try {
         }
 
         if (-not $shouldStop -and ((Get-Date) - $lastPulse).TotalMilliseconds -ge 1000) {
+            Send-OffersToLan
             Send-OffersToPeers
             $lastPulse = Get-Date
         }
