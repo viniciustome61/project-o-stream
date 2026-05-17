@@ -291,6 +291,7 @@ class SlotState:
         self.proc:          Optional[subprocess.Popen] = None  # type: ignore[type-arg]
         self.zoom_level:    float          = 1.0
         self.torch_on:      bool           = False
+        self.relay_mode:    str            = "obs"  # "obs" = UDP relay via FFmpeg | "srt" = OBS connects directly
 
     @property
     def connected(self) -> bool:
@@ -667,6 +668,11 @@ class Receiver:
     def _relay_worker_slot(self, slot: SlotState) -> None:
         self._log_msg(f"Cam {slot.index + 1}: waiting on SRT :{slot.srt_port} -> {self.obs_input_url(slot)}")
         while not self.stopping:
+            # SRT direct mode: OBS connects to the SRT port itself, no FFmpeg relay needed
+            if slot.relay_mode == "srt":
+                slot.ffmpeg_status = "srt-direct"
+                time.sleep(0.2)
+                continue
             try:
                 t0 = time.time()
                 slot.ffmpeg_status = "listening"
@@ -674,6 +680,10 @@ class Receiver:
                 slot.proc.wait()
                 if self.stopping:
                     break
+                # Mode was switched to SRT while FFmpeg ran — skip retry, go idle
+                if slot.relay_mode == "srt":
+                    slot.ffmpeg_status = "srt-direct"
+                    continue
                 elapsed = time.time() - t0
                 code    = slot.proc.returncode
                 stderr_tail = ""
@@ -682,6 +692,18 @@ class Receiver:
                     last = [l.strip() for l in raw.splitlines() if l.strip()]
                     if last:
                         stderr_tail = f" ({last[-1][:80]})"
+                # Clean SRT caller disconnect: FFmpeg exits 0 after streaming >2s
+                if code == 0 and elapsed > 2.0:
+                    slot.ffmpeg_status = "idle"
+                    self._log_msg(f"Cam {slot.index + 1}: phone disconnected")
+                    slot.ip       = None
+                    slot.hostname = None
+                    slot.tele_ts  = 0.0
+                    slot.battery  = None
+                    slot.thermal  = None
+                    slot.rtt_ms   = None
+                    time.sleep(1)
+                    continue
                 if elapsed < 3.0:
                     slot.ffmpeg_status = f"err {code}{stderr_tail} - retry 3s"
                 else:
@@ -689,7 +711,7 @@ class Receiver:
                     self._log_msg(f"Cam {slot.index + 1}: FFmpeg exited ({code}), restarting...")
                 time.sleep(3)
             except Exception as e:
-                slot.ffmpeg_status = f"error - retry 3s"
+                slot.ffmpeg_status = "error - retry 3s"
                 self._log_msg(f"Cam {slot.index + 1}: relay error: {e}")
                 time.sleep(3)
 
@@ -771,7 +793,7 @@ class Receiver:
             return False
 
     def obs_input_url(self, slot: SlotState) -> str:
-        if self.args.direct_to_obs:
+        if self.args.direct_to_obs or slot.relay_mode == "srt":
             latency_us = self.args.latency * 1000
             return (
                 f"srt://0.0.0.0:{slot.srt_port}"
@@ -822,15 +844,16 @@ class ReceiverApp(App[None]):
     }
     """
     BINDINGS = [
-        Binding("c",      "copy_obs_input", "Copy OBS",  show=True),
-        Binding("s",      "copy_log",       "Copy log",  show=True),
-        Binding("l",      "cycle_lens",     "Lens",      show=True),
-        Binding("t",      "toggle_torch",   "Torch",     show=True),
-        Binding("z",      "zoom_in",        "Zoom+",     show=True),
-        Binding("x",      "zoom_out",       "Zoom-",     show=True),
-        Binding("k",      "kill_slot",      "Kill slot", show=True),
-        Binding("q",      "quit_app",       "Quit",      show=True),
-        Binding("ctrl+c", "quit_app",       "Quit",      show=False),
+        Binding("c",      "copy_obs_input",   "Copy OBS",  show=True),
+        Binding("s",      "copy_log",         "Copy log",  show=True),
+        Binding("m",      "cycle_relay_mode", "Mode",      show=True),
+        Binding("l",      "cycle_lens",       "Lens",      show=True),
+        Binding("t",      "toggle_torch",     "Torch",     show=True),
+        Binding("z",      "zoom_in",          "Zoom+",     show=True),
+        Binding("x",      "zoom_out",         "Zoom-",     show=True),
+        Binding("k",      "kill_slot",        "Kill slot", show=True),
+        Binding("q",      "quit_app",         "Quit",      show=True),
+        Binding("ctrl+c", "quit_app",         "Quit",      show=False),
     ]
 
     def __init__(self, receiver: Receiver) -> None:
@@ -918,18 +941,22 @@ class ReceiverApp(App[None]):
 
         obs = Text(
             self._receiver.obs_input_url(s),
-            style="green" if (s.connected or self._receiver.args.direct_to_obs) else "dim",
+            style="green" if (s.connected or self._receiver.args.direct_to_obs or s.relay_mode == "srt") else "dim",
         )
 
         st = s.ffmpeg_status
         if st == "listening":
             status = Text(st, style="dim")
+        elif st == "srt-direct":
+            status = Text("srt-direct", style="cyan")
         elif st in ("restarting", "idle"):
             status = Text(st, style="yellow")
         elif st.startswith("err"):
             status = Text(st, style="red")
         else:
             status = Text(st, style="dim")
+        if s.relay_mode == "srt":
+            status.append("  [SRT]", style="bold cyan")
         if s.connected:
             if s.torch_on:
                 status.append("  🔦", style="yellow")
@@ -996,8 +1023,28 @@ class ReceiverApp(App[None]):
         self._last_action_t[key] = now
         return True
 
+    def action_cycle_relay_mode(self) -> None:
+        if not self._debounce("mode", 500):
+            return
+        slot = self._selected_slot()
+        if slot is None:
+            self._receiver._log_msg("Cycle mode: no camera row selected")
+            return
+        slot.relay_mode = "srt" if slot.relay_mode == "obs" else "obs"
+        # Kill FFmpeg so it releases the SRT port; relay_worker_slot will idle or restart
+        if slot.proc and slot.proc.poll() is None:
+            try:
+                slot.proc.kill()
+            except Exception:
+                pass
+        # Ask phone to reconnect so it hits the new listener (OBS or FFmpeg) immediately
+        if slot.ip:
+            self._receiver.send_control(slot, "reconnect")
+        mode_label = "SRT direct" if slot.relay_mode == "srt" else "UDP relay"
+        self._receiver._log_msg(f"Cam {slot.index + 1}: switched to {mode_label}")
+
     def action_cycle_lens(self) -> None:
-        if not self._debounce("lens", 400):
+        if not self._debounce("lens", 500):
             return
         slot = self._selected_slot()
         if slot is None:
@@ -1010,7 +1057,7 @@ class ReceiverApp(App[None]):
         self._receiver.send_control(slot, "cycleLens")
 
     def action_toggle_torch(self) -> None:
-        if not self._debounce("torch", 400):
+        if not self._debounce("torch", 500):
             return
         slot = self._selected_slot()
         if slot is None:
@@ -1023,7 +1070,7 @@ class ReceiverApp(App[None]):
         self._receiver.send_control(slot, "toggleTorch", {"torch": slot.torch_on})
 
     def action_zoom_in(self) -> None:
-        if not self._debounce("zoom", 200):
+        if not self._debounce("zoom", 500):
             return
         slot = self._selected_slot()
         if slot is None:
@@ -1036,7 +1083,7 @@ class ReceiverApp(App[None]):
         self._receiver.send_control(slot, "setZoom", {"zoom": slot.zoom_level})
 
     def action_zoom_out(self) -> None:
-        if not self._debounce("zoom", 200):
+        if not self._debounce("zoom", 500):
             return
         slot = self._selected_slot()
         if slot is None:

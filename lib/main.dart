@@ -87,6 +87,19 @@ class _SenderScreenState extends State<SenderScreen> {
   bool _volDownHeld = false;
   bool _volUpHeld = false;
 
+  // ── tap debounce ───────────────────────────────────────────────
+  final Map<String, DateTime> _lastTap = {};
+
+  bool _canTap(String key) {
+    final last = _lastTap[key];
+    if (last != null &&
+        DateTime.now().difference(last).inMilliseconds < 500) {
+      return false;
+    }
+    _lastTap[key] = DateTime.now();
+    return true;
+  }
+
   // ── debug overlay ──────────────────────────────────────────────
   final List<String> _log = [];
   bool _showDebug = false;
@@ -431,22 +444,26 @@ class _SenderScreenState extends State<SenderScreen> {
 
       final action = payload['action'] as String?;
       if (action == 'cycleLens') {
-        if (_busy) {
-          _dbg('Remote lens cycle ignored while busy');
-          return;
-        }
+        if (_busy || !_canTap('lens')) return;
         _dbg('Remote lens cycle by ${datagram.address.address}');
         await _switchCamera();
       } else if (action == 'toggleTorch') {
-        if (_busy) return;
+        if (_busy || !_canTap('torch')) return;
         _dbg('Remote torch toggle by ${datagram.address.address}');
         await _toggleTorch();
       } else if (action == 'setZoom') {
-        if (_busy) return;
+        if (_busy || !_canTap('zoom')) return;
         final zoom = (payload['zoom'] as num?)?.toDouble();
         if (zoom != null) {
           _dbg('Remote zoom ${zoom.toStringAsFixed(1)}x by ${datagram.address.address}');
           await _setZoom(zoom.clamp(1.0, 8.0));
+        }
+      } else if (action == 'reconnect') {
+        _dbg('Remote reconnect by ${datagram.address.address}');
+        if (_live) {
+          unawaited(_restartStream());
+        } else if (_config.autoReconnect) {
+          _scheduleAutoConnect();
         }
       }
     } catch (error) {
@@ -579,10 +596,8 @@ class _SenderScreenState extends State<SenderScreen> {
 
   Future<void> _switchCamera() async {
     if (_busy) return;
-    final lenses = _availableLensIds;
-    final current = lenses.indexOf(_config.lens);
-    final next = lenses[(current + 1) % lenses.length];
-    await _setLens(next);
+    final isFront = _config.lens == 'front';
+    await _setLens(isFront ? 'wide' : 'front');
   }
 
   Future<void> _setLens(String lens) async {
@@ -765,8 +780,12 @@ class _SenderScreenState extends State<SenderScreen> {
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
                       IconButton.filledTonal(
-                        onPressed:
-                            _busy ? null : () => unawaited(_switchCamera()),
+                        onPressed: _busy
+                            ? null
+                            : () {
+                                if (!_canTap('lens')) return;
+                                unawaited(_switchCamera());
+                              },
                         icon: const Icon(Icons.cameraswitch),
                       ),
                       _AutoConnectStatus(
@@ -775,8 +794,12 @@ class _SenderScreenState extends State<SenderScreen> {
                         receiver: _receiver,
                       ),
                       IconButton.filledTonal(
-                        onPressed:
-                            _busy ? null : () => unawaited(_toggleTorch()),
+                        onPressed: _busy
+                            ? null
+                            : () {
+                                if (!_canTap('torch')) return;
+                                unawaited(_toggleTorch());
+                              },
                         icon: Icon(_torch ? Icons.flash_on : Icons.flash_off),
                       ),
                     ],
@@ -788,7 +811,10 @@ class _SenderScreenState extends State<SenderScreen> {
                   max: 8,
                   divisions: 28,
                   label: '${_zoom.toStringAsFixed(1)}x',
-                  onChanged: (value) => unawaited(_setZoom(value)),
+                  onChanged: (value) {
+                    if (!_canTap('zoom')) return;
+                    unawaited(_setZoom(value));
+                  },
                 ),
               ],
             ),
