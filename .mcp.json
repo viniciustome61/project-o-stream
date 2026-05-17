@@ -1,5 +1,5 @@
 {
-  "servers": {
+  "mcpServers": {
     "sideloadly": {
       "type": "stdio",
       "command": "python",
