@@ -541,7 +541,7 @@ def _propose_version(
     bump, reason = gemini_version_bump(msgs)
     new_ver = bump_version(cur_maj, cur_min, cur_pat, bump)
 
-    from_label = f"{cur_ver} → " if cur_ver else ""
+    from_label = f"{cur_ver} -> " if cur_ver else ""
     print(f"[ship] Version: {from_label}{new_ver}  ({bump}: {reason})")
 
     ans = input(
