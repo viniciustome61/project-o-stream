@@ -382,7 +382,11 @@ class Receiver:
         self._log_lock = threading.Lock()
         self._log: list[tuple[str, str]] = []
         self._app: Optional["ReceiverApp"] = None
-        log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "server.log")
+        if getattr(sys, 'frozen', False):
+            script_dir = os.path.dirname(sys.executable)
+        else:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+        log_path = os.path.join(script_dir, "server.log")
         self._log_file = open(log_path, "a", encoding="utf-8", buffering=1)  # noqa: SIM115
 
         for slot in self.slots:
@@ -624,6 +628,12 @@ class Receiver:
                     slot = canonical
 
             slot.ip         = client_ip
+            # Evict IP from any other slot (discovery/telemetry race dedup).
+            for _other in self.slots:
+                if _other.index != slot.index and _other.ip == client_ip:
+                    _other.ip = None
+                    _other.hostname = None
+                    _other.tele_ts = 0.0
             slot.transport  = payload.get("transport") or _infer_transport(client_ip)
             slot.hostname   = incoming_hostname or slot.hostname
             slot.lens       = payload.get("lens") or slot.lens
@@ -872,17 +882,9 @@ class ReceiverApp(App[None]):
     def on_mount(self) -> None:
         table = self.query_one(DataTable)
         col_defs = [
-            ("●",         1),
-            ("CAM",       3),
-            ("DEVICE",   18),
-            ("NETWORK",  22),
-            ("RTT",       6),
-            ("BATTERY",  14),
-            ("THERMAL",   6),
-            ("OBS INPUT", 38),
-            ("STATUS",   14),
+            "●", "CAM", "DEVICE", "NETWORK", "RTT", "BATTERY", "THERMAL", "OBS INPUT", "STATUS",
         ]
-        self._col_keys = [table.add_column(label, width=w) for label, w in col_defs]
+        self._col_keys = [table.add_column(label) for label in col_defs]
         for slot in self._receiver.slots:
             table.add_row(*self._slot_cells(slot), key=str(slot.index))
             self._known_slots.add(slot.index)
@@ -939,8 +941,13 @@ class ReceiverApp(App[None]):
         else:
             thermal = Text("—", style="dim")
 
+        # Show compact URL (no query params) — full URL copied via 'c' key
+        if self._receiver.args.direct_to_obs or s.relay_mode == "srt":
+            obs_display = f"srt://0.0.0.0:{s.srt_port}"
+        else:
+            obs_display = f"udp://127.0.0.1:{s.obs_port}"
         obs = Text(
-            self._receiver.obs_input_url(s),
+            obs_display,
             style="green" if (s.connected or self._receiver.args.direct_to_obs or s.relay_mode == "srt") else "dim",
         )
 
@@ -977,7 +984,7 @@ class ReceiverApp(App[None]):
                 cells = self._slot_cells(slot)
                 for col_idx, val in enumerate(cells):
                     try:
-                        table.update_cell(str(slot.index), self._col_keys[col_idx], val)
+                        table.update_cell(str(slot.index), self._col_keys[col_idx], val, update_width=True)
                     except Exception:
                         pass
         self._update_subtitle()
