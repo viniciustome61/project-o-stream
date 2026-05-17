@@ -17,20 +17,13 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Callable, Optional
 
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.widgets import DataTable, Footer, Header, RichLog
-
-try:
-    import numpy as _np
-    import pyvirtualcam as _pvc
-    _VCAM_AVAILABLE = True
-except ImportError:
-    _VCAM_AVAILABLE = False
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -257,17 +250,6 @@ def _batt_bar(pct: float, width: int = 8) -> str:
     return "▮" * filled + "▯" * (width - filled)
 
 
-def _check_ndi(ffmpeg_path: str) -> bool:
-    try:
-        result = subprocess.run(
-            [ffmpeg_path, "-muxers"],
-            capture_output=True, text=True, timeout=5
-        )
-        return "libndi_newtek" in (result.stdout + result.stderr)
-    except Exception:
-        return False
-
-
 def _open_firewall(port: int, proto: str = "UDP") -> None:
     rule_name = f"Project-O-Stream-{proto}-{port}"
     try:
@@ -287,101 +269,6 @@ def _open_firewall(port: int, proto: str = "UDP") -> None:
 
 
 # ---------------------------------------------------------------------------
-# Unity Capture dynamic registration helpers
-# ---------------------------------------------------------------------------
-
-def _find_ucap_dlls() -> "tuple[Optional[str], Optional[str]]":
-    if getattr(sys, "frozen", False):
-        base = os.path.dirname(sys.executable)
-    else:
-        base = os.path.dirname(os.path.abspath(sys.argv[0]))
-    def _find(name: str) -> Optional[str]:
-        for d in [base, os.path.join(base, "UC", "Install")]:
-            p = os.path.join(d, name)
-            if os.path.isfile(p):
-                return p
-        return None
-    return _find("UnityCaptureFilter64.dll"), _find("UnityCaptureFilter32.dll")
-
-
-def _is_admin() -> bool:
-    try:
-        import ctypes
-        return bool(ctypes.windll.shell32.IsUserAnAdmin())
-    except Exception:
-        return False
-
-
-def _ucap_regsvr(dll64: str, dll32: Optional[str], extra_args: list) -> "tuple[bool, str]":
-    # Mirror UC's own InstallMultipleDevices.bat: CD to DLL dir, relative names, /s for silent.
-    dll_dir = os.path.dirname(dll64)
-    sys_root = os.environ.get("SystemRoot", r"C:\Windows")
-    reg64 = os.path.join(sys_root, "System32", "regsvr32.exe")
-    reg32 = os.path.join(sys_root, "SysWOW64", "regsvr32.exe")
-
-    def _run_direct(exe: str, dll_name: str) -> int:
-        proc = subprocess.Popen(
-            [exe, "/s"] + extra_args + [dll_name],
-            cwd=dll_dir,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
-        try:
-            proc.wait(timeout=15)
-            return proc.returncode
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
-            return -999
-
-    def _run_elevated(exe: str, dll_name: str) -> int:
-        # Ask Windows for a UAC elevation via PowerShell Start-Process -Verb RunAs.
-        # If the caller is already admin, no dialog appears and the process runs inline.
-        ps_args = ", ".join(f'"{a}"' for a in (["/s"] + extra_args + [dll_name]))
-        ps_cmd = (
-            f'$p = Start-Process -FilePath "{exe}" -ArgumentList @({ps_args}) '
-            f'-Verb RunAs -Wait -PassThru -WorkingDirectory "{dll_dir}"; '
-            f'if ($p) {{ exit $p.ExitCode }} else {{ exit 1 }}'
-        )
-        try:
-            r = subprocess.run(
-                ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
-                capture_output=True, timeout=60,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
-            return r.returncode
-        except Exception:
-            return -998
-
-    try:
-        rc32 = _run_direct(reg32, os.path.basename(dll32)) if dll32 and os.path.isfile(dll32) else None
-        rc64 = _run_direct(reg64, os.path.basename(dll64))
-        ok = (rc64 == 0) or (rc32 is not None and rc32 == 0)
-
-        if not ok:
-            # Direct call failed — re-attempt via UAC elevation (no dialog if already admin).
-            rc32_e = _run_elevated(reg32, os.path.basename(dll32)) if dll32 and os.path.isfile(dll32) else None
-            rc64_e = _run_elevated(reg64, os.path.basename(dll64))
-            ok_e = (rc64_e == 0) or (rc32_e is not None and rc32_e == 0)
-            if ok_e:
-                rc64, rc32 = rc64_e, rc32_e
-                ok = True
-
-        detail = f"rc64={rc64}({rc64:#010x})" + (f" rc32={rc32}({rc32:#010x})" if rc32 is not None else "")
-        return ok, detail
-    except Exception as e:
-        return False, str(e)
-
-
-def _ucap_register(dll64: str, dll32: Optional[str], count: int) -> "tuple[bool, str]":
-    return _ucap_regsvr(dll64, dll32, [f"/i:UnityCaptureDevices={count}"])
-
-
-def _ucap_unregister(dll64: str, dll32: Optional[str]) -> None:
-    _ucap_regsvr(dll64, dll32, ["/u"])
-
-
-# ---------------------------------------------------------------------------
 # Slot state
 # ---------------------------------------------------------------------------
 
@@ -390,7 +277,6 @@ class SlotState:
         self.index       = index
         self.srt_port    = srt_port
         self.obs_port    = obs_port
-        self.webcam_port = obs_port + 1  # dedicated port so webcam and OBS don't compete
         self.ip: Optional[str] = None
         self.hostname:  Optional[str]   = None
         self.lens:      Optional[str]   = None
@@ -403,10 +289,8 @@ class SlotState:
         self.tele_ts:       float           = 0.0
         self.ffmpeg_status: str            = "idle"
         self.proc:          Optional[subprocess.Popen] = None  # type: ignore[type-arg]
-        self.webcam_device: Optional[str]  = None
         self.zoom_level:    float          = 1.0
         self.torch_on:      bool           = False
-        self.relay_mode:    str            = "obs"  # "obs" | "srt" | "vcam" | "ndi"
 
     @property
     def connected(self) -> bool:
@@ -492,13 +376,7 @@ class Receiver:
             grow_fn=self._grow_slot,
         )
 
-        self._dll64, self._dll32 = _find_ucap_dlls() if _VCAM_AVAILABLE else (None, None)
-        self._ucap_count   = 0
-
-        self.ffmpeg_path   = args.ffmpeg or "ffmpeg"
-        self.ndi_available = False
-        if args.ndi and not args.direct_to_obs:
-            self.ndi_available = _check_ndi(self.ffmpeg_path)
+        self.ffmpeg_path = args.ffmpeg or "ffmpeg"
 
         self._log_lock = threading.Lock()
         self._log: list[tuple[str, str]] = []
@@ -522,19 +400,6 @@ class Receiver:
         _open_firewall(slot.srt_port, "TCP")
         self._log_msg(f"Camera {i + 1} added automatically (SRT :{slot.srt_port} → UDP :{slot.obs_port})")
         return i
-
-    def _ensure_ucap_devices(self, needed: int) -> None:
-        if not self._dll64 or not _VCAM_AVAILABLE:
-            return
-        if needed <= self._ucap_count:
-            return
-        self._log_msg(f"Unity Capture: registering {needed} device(s)...")
-        ok, detail = _ucap_register(self._dll64, self._dll32, needed)
-        if ok:
-            self._ucap_count = needed
-            self._log_msg(f"Unity Capture: {needed} device(s) ready ({detail})")
-        else:
-            self._log_msg(f"Unity Capture: registration failed ({detail}) — run server.bat as admin")
 
     # ------------------------------------------------------------------ log
 
@@ -780,75 +645,27 @@ class Receiver:
 
         sock.close()
 
-    def _start_webcam_ffmpeg(self, slot: SlotState, w: int, h: int, fps: int) -> "subprocess.Popen[bytes]":
-        # timeout=5000000 (5s) so FFmpeg exits cleanly when the phone stops streaming
-        # instead of blocking the frame-read pipe forever.
-        input_url = f"udp://127.0.0.1:{slot.webcam_port}?pkt_size=1316&timeout=5000000"
-        cmd = [
-            self.ffmpeg_path,
-            "-hide_banner", "-loglevel", "warning",
-            "-fflags", "nobuffer+discardcorrupt",
-            "-probesize", "32k", "-analyzeduration", "0",
-            "-f", "mpegts",
-            "-i", input_url,
-            "-vf", f"scale={w}:{h}:flags=bilinear,format=rgb24",
-            "-an", "-f", "rawvideo",
-            "pipe:1",
-        ]
-        return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
     def _start_ffmpeg(self, slot: SlotState) -> "subprocess.Popen[bytes]":
         latency_us = self.args.latency * 1000
-        input_url  = (
+        input_url = (
             f"srt://0.0.0.0:{slot.srt_port}"
             f"?mode=listener&transtype=live"
             f"&latency={latency_us}&rcvlatency={latency_us}&peerlatency={latency_us}"
             f"&tlpktdrop=1&pkt_size=1316"
         )
-        obs_target    = f"udp://127.0.0.1:{slot.obs_port}?pkt_size=1316"
-        webcam_target = f"udp://127.0.0.1:{slot.webcam_port}?pkt_size=1316"
-        srt_target    = (
-            f"srt://0.0.0.0:{slot.obs_port}"
-            f"?mode=listener&transtype=live&pkt_size=1316"
-        )
-
-        mode = slot.relay_mode
-        # Validate mode against available capabilities; fall back to "obs" if not possible.
-        if mode == "vcam" and not (getattr(self.args, "webcam", False) and _VCAM_AVAILABLE and self._dll64):
-            mode = "obs"
-        if mode == "ndi" and not (self.args.ndi and self.ndi_available):
-            mode = "obs"
-
+        obs_target = f"udp://127.0.0.1:{slot.obs_port}?pkt_size=1316"
         cmd = [
             self.ffmpeg_path,
             "-hide_banner", "-loglevel", "error",
             "-fflags", "nobuffer", "-flags", "low_delay",
             "-probesize", "32k", "-analyzeduration", "0",
             "-i", input_url,
+            "-map", "0", "-c", "copy", "-f", "mpegts", obs_target,
         ]
-
-        if mode == "srt":
-            cmd += ["-map", "0", "-c", "copy", "-f", "mpegts", srt_target]
-        elif mode == "vcam":
-            # Only feed the webcam worker; OBS not needed in this mode.
-            cmd += ["-map", "0", "-c", "copy", "-f", "mpegts", webcam_target]
-        elif mode == "ndi":
-            ndi_name = f"Project-O-Camera-{slot.index + 1}"
-            cmd += ["-map", "0", "-vf", "format=uyvy422", "-c:a", "pcm_s16le", "-f", "libndi_newtek", ndi_name]
-        else:
-            # "obs" — default UDP relay
-            cmd += ["-map", "0", "-c", "copy", "-f", "mpegts", obs_target]
-            if getattr(self.args, "webcam", False):
-                cmd += ["-map", "0", "-c", "copy", "-f", "mpegts", webcam_target]
-            if self.args.ndi and self.ndi_available:
-                ndi_name = f"Project-O-Camera-{slot.index + 1}"
-                cmd += ["-map", "0", "-vf", "format=uyvy422", "-c:a", "pcm_s16le", "-f", "libndi_newtek", ndi_name]
-
         return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
     def _relay_worker_slot(self, slot: SlotState) -> None:
-        ndi_note = f" + NDI: Project-O-Camera-{slot.index + 1}" if (self.args.ndi and self.ndi_available) else ""
-        self._log_msg(f"Cam {slot.index + 1}: waiting on SRT :{slot.srt_port} -> {self.obs_input_url(slot)}{ndi_note}")
+        self._log_msg(f"Cam {slot.index + 1}: waiting on SRT :{slot.srt_port} -> {self.obs_input_url(slot)}")
         while not self.stopping:
             try:
                 t0 = time.time()
@@ -876,109 +693,8 @@ class Receiver:
                 self._log_msg(f"Cam {slot.index + 1}: relay error: {e}")
                 time.sleep(3)
 
-    def _webcam_worker_slot(self, slot: SlotState) -> None:
-        if not _VCAM_AVAILABLE:
-            self._log_msg("Webcam: pip install pyvirtualcam numpy to enable")
-            return
-
-        w, h, fps = self.args.webcam_width, self.args.webcam_height, self.args.webcam_fps
-        frame_bytes = w * h * 3
-
-        backends: list[tuple[str, str]] = []
-        if slot.index == 0:
-            backends.append(("obs", "OBS Virtual Camera"))
-        if self._dll64:
-            unity_name = "Unity Video Capture" if slot.index == 0 else f"Unity Video Capture ({slot.index})"
-            backends.append(("unitycapture", unity_name))
-
-        self._log_msg(f"Cam {slot.index + 1}: webcam {w}x{h}@{fps}fps")
-
-        while not self.stopping:
-            # Wait until a phone is assigned to this slot before occupying the driver.
-            while slot.ip is None:
-                if self.stopping:
-                    return
-                time.sleep(0.5)
-
-            waited = 0
-            while not (slot.proc and slot.proc.poll() is None):
-                if self.stopping:
-                    return
-                time.sleep(0.5)
-                waited += 1
-                if waited >= 60:
-                    self._log_msg(f"Cam {slot.index + 1}: webcam waiting for relay...")
-                    waited = 0
-
-            if self.stopping:
-                return
-
-            for backend_name, device_name in backends:
-                if self.stopping:
-                    return
-                proc: Optional[subprocess.Popen] = None  # type: ignore[type-arg]
-                try:
-                    proc = self._start_webcam_ffmpeg(slot, w, h, fps)
-                    # Buffer the first complete frame before opening the capture device.
-                    # This prevents Unity Capture from showing "has not started sending
-                    # image data" to consumers (OBS) during the decode startup gap.
-                    first_raw = b""
-                    while len(first_raw) < frame_bytes and proc.poll() is None:
-                        chunk = proc.stdout.read(frame_bytes - len(first_raw))  # type: ignore[union-attr]
-                        if not chunk:
-                            break
-                        first_raw += chunk
-                    if len(first_raw) < frame_bytes:
-                        # Decoder exited without data (phone not streaming yet); retry later.
-                        continue
-                    with _pvc.Camera(
-                        width=w, height=h, fps=fps,
-                        fmt=_pvc.PixelFormat.RGB,
-                        device=device_name,
-                        backend=backend_name,
-                        print_fps=False,
-                    ) as cam:
-                        slot.webcam_device = cam.device
-                        self._log_msg(f"Cam {slot.index + 1}: webcam live on '{cam.device}' ({backend_name})")
-                        cam.send(_np.frombuffer(first_raw, dtype=_np.uint8).reshape((h, w, 3)))
-                        cam.sleep_until_next_frame()
-                        while not self.stopping and proc.poll() is None:
-                            raw = proc.stdout.read(frame_bytes)  # type: ignore[union-attr]
-                            if len(raw) < frame_bytes:
-                                break
-                            cam.send(_np.frombuffer(raw, dtype=_np.uint8).reshape((h, w, 3)))
-                            cam.sleep_until_next_frame()
-                        if proc.returncode not in (None, 0, -9, -15):
-                            err = (proc.stderr.read() if proc.stderr else b"").decode(errors="replace").strip()
-                            tail = err.splitlines()[-1][:120] if err else ""
-                            if tail:
-                                self._log_msg(f"Cam {slot.index + 1}: webcam FFmpeg exited {proc.returncode}: {tail}")
-                    break
-                except Exception as exc:
-                    self._log_msg(f"Cam {slot.index + 1}: {backend_name} '{device_name}': {exc}")
-                finally:
-                    if proc is not None and proc.poll() is None:
-                        proc.kill()
-                        proc.wait()
-            else:
-                slot.webcam_device = None
-                hint = (
-                    "open OBS → Tools → Virtual Camera → Start"
-                    if slot.index == 0 else
-                    "use --ndi flag for multi-camera virtual output (NDI Tools at ndi.video)"
-                )
-                self._log_msg(f"Cam {slot.index + 1}: no webcam backend — {hint}")
-                time.sleep(10)
-                continue
-
-            slot.webcam_device = None
-            if not self.stopping:
-                time.sleep(3)
-
     def _relay_worker(self) -> None:
         if self.args.direct_to_obs:
-            if getattr(self.args, "webcam", False):
-                self._log_msg("Webcam output not available in --direct-to-obs mode")
             return
         started: set[int] = set()
         while not self.stopping:
@@ -991,23 +707,11 @@ class Receiver:
                         daemon=True,
                         name=f"relay-{slot.index}",
                     ).start()
-                    if getattr(self.args, "webcam", False):
-                        threading.Thread(
-                            target=self._webcam_worker_slot,
-                            args=(slot,),
-                            daemon=True,
-                            name=f"webcam-{slot.index}",
-                        ).start()
             time.sleep(0.5)
 
     # ------------------------------------------------------------------ run / shutdown
 
     def run(self) -> None:
-        if self.args.ndi:
-            self._log_msg(
-                "NDI: enabled (libndi_newtek found)" if self.ndi_available
-                else "NDI: disabled — need NDI-enabled FFmpeg (github.com/valnoxy/ndi-ffmpeg-build)"
-            )
 
         for target, name in [
             (self._discovery_worker, "discovery"),
@@ -1037,10 +741,6 @@ class Receiver:
                         slot.proc.kill()
                     except Exception:
                         pass
-        if self._dll64 and self._ucap_count > 0:
-            self._log_msg("Unity Capture: removing all devices...")
-            _ucap_unregister(self._dll64, self._dll32)
-            self._log_msg("Unity Capture: devices removed")
         try:
             self._log_file.close()
         except Exception:
@@ -1079,14 +779,6 @@ class Receiver:
                 f"&latency={latency_us}&rcvlatency={latency_us}"
                 f"&peerlatency={latency_us}&tlpktdrop=1&pkt_size=1316"
             )
-        mode = slot.relay_mode
-        if mode == "srt":
-            return f"srt://127.0.0.1:{slot.obs_port}?mode=caller&pkt_size=1316"
-        if mode == "vcam":
-            name = slot.webcam_device or ("Unity Video Capture" if slot.index == 0 else f"Unity Video Capture ({slot.index})")
-            return f"Webcam: {name}"
-        if mode == "ndi":
-            return f"NDI: Project-O-Camera-{slot.index + 1}"
         return f"udp://127.0.0.1:{slot.obs_port}?pkt_size=1316"
 
     def copy_obs_input(self, slot: SlotState) -> bool:
@@ -1130,16 +822,15 @@ class ReceiverApp(App[None]):
     }
     """
     BINDINGS = [
-        Binding("c",      "copy_obs_input",    "Copy OBS",  show=True),
-        Binding("s",      "copy_log",          "Copy log",  show=True),
-        Binding("l",      "cycle_lens",        "Lens",      show=True),
-        Binding("t",      "toggle_torch",      "Torch",     show=True),
-        Binding("z",      "zoom_in",           "Zoom+",     show=True),
-        Binding("x",      "zoom_out",          "Zoom-",     show=True),
-        Binding("m",      "cycle_relay_mode",  "Mode",      show=True),
-        Binding("k",      "kill_slot",         "Kill slot", show=True),
-        Binding("q",      "quit_app",          "Quit",      show=True),
-        Binding("ctrl+c", "quit_app",          "Quit",      show=False),
+        Binding("c",      "copy_obs_input", "Copy OBS",  show=True),
+        Binding("s",      "copy_log",       "Copy log",  show=True),
+        Binding("l",      "cycle_lens",     "Lens",      show=True),
+        Binding("t",      "toggle_torch",   "Torch",     show=True),
+        Binding("z",      "zoom_in",        "Zoom+",     show=True),
+        Binding("x",      "zoom_out",       "Zoom-",     show=True),
+        Binding("k",      "kill_slot",      "Kill slot", show=True),
+        Binding("q",      "quit_app",       "Quit",      show=True),
+        Binding("ctrl+c", "quit_app",       "Quit",      show=False),
     ]
 
     def __init__(self, receiver: Receiver) -> None:
@@ -1157,9 +848,18 @@ class ReceiverApp(App[None]):
 
     def on_mount(self) -> None:
         table = self.query_one(DataTable)
-        self._col_keys = list(table.add_columns(
-            "●", "CAM", "DEVICE", "NETWORK", "RTT", "BATTERY", "THERMAL", "OBS INPUT", "STATUS"
-        ))
+        col_defs = [
+            ("●",         1),
+            ("CAM",       3),
+            ("DEVICE",   18),
+            ("NETWORK",  22),
+            ("RTT",       6),
+            ("BATTERY",  14),
+            ("THERMAL",   6),
+            ("OBS INPUT", 38),
+            ("STATUS",   14),
+        ]
+        self._col_keys = [table.add_column(label, width=w) for label, w in col_defs]
         for slot in self._receiver.slots:
             table.add_row(*self._slot_cells(slot), key=str(slot.index))
             self._known_slots.add(slot.index)
@@ -1216,16 +916,10 @@ class ReceiverApp(App[None]):
         else:
             thermal = Text("—", style="dim")
 
-        obs = Text()
-        obs.append(self._receiver.obs_input_url(s),
-                   style="green" if (s.connected or self._receiver.args.direct_to_obs) else "dim")
-        if self._receiver.args.ndi and self._receiver.ndi_available:
-            obs.append(f"  NDI: Project-O-Camera-{s.index + 1}", style="cyan dim")
-        if getattr(self._receiver.args, "webcam", False) and _VCAM_AVAILABLE:
-            if s.webcam_device:
-                obs.append(f"  Webcam: {s.webcam_device}", style="magenta")
-            elif s.index == 0:
-                obs.append("  Webcam: OBS Virtual Camera", style="magenta dim")
+        obs = Text(
+            self._receiver.obs_input_url(s),
+            style="green" if (s.connected or self._receiver.args.direct_to_obs) else "dim",
+        )
 
         st = s.ffmpeg_status
         if st == "listening":
@@ -1236,9 +930,6 @@ class ReceiverApp(App[None]):
             status = Text(st, style="red")
         else:
             status = Text(st, style="dim")
-        if s.relay_mode != "obs":
-            mode_labels = {"srt": "[SRT]", "vcam": "[VCAM]", "ndi": "[NDI]"}
-            status.append(f"  {mode_labels.get(s.relay_mode, s.relay_mode.upper())}", style="cyan bold")
         if s.connected:
             if s.torch_on:
                 status.append("  🔦", style="yellow")
@@ -1271,14 +962,7 @@ class ReceiverApp(App[None]):
         hrs, rem  = divmod(total_s, 3600)
         mins, sec = divmod(rem, 60)
         uptime    = f"{hrs:02d}:{mins:02d}:{sec:02d}"
-        webcam_on = getattr(r.args, "webcam", False) and _VCAM_AVAILABLE
-        mode      = (
-            "direct-to-OBS"    if r.args.direct_to_obs else
-            "relay+webcam+NDI" if (webcam_on and r.args.ndi and r.ndi_available) else
-            "relay+webcam"     if webcam_on else
-            "relay→OBS+NDI"    if (r.args.ndi and r.ndi_available) else
-            "relay→OBS"
-        )
+        mode = "direct-to-OBS" if r.args.direct_to_obs else "relay→OBS"
         lan_label = r.lan_ip
         if len(r.lan_ips) > 1:
             lan_label = f"{r.lan_ip} (+{len(r.lan_ips) - 1})"
@@ -1364,37 +1048,6 @@ class ReceiverApp(App[None]):
         slot.zoom_level = max(1.0, round(slot.zoom_level - 0.5, 1))
         self._receiver.send_control(slot, "setZoom", {"zoom": slot.zoom_level})
 
-    def action_cycle_relay_mode(self) -> None:
-        if not self._debounce("mode", 400):
-            return
-        slot = self._selected_slot()
-        if slot is None:
-            self._receiver._log_msg("Cycle mode: no camera row selected")
-            return
-        r = self._receiver
-        modes = ["obs"]
-        modes.append("srt")
-        if getattr(r.args, "webcam", False) and _VCAM_AVAILABLE and r._dll64:
-            modes.append("vcam")
-        if r.args.ndi and r.ndi_available:
-            modes.append("ndi")
-        cur = slot.relay_mode if slot.relay_mode in modes else "obs"
-        next_mode = modes[(modes.index(cur) + 1) % len(modes)]
-        slot.relay_mode = next_mode
-        if slot.proc and slot.proc.poll() is None:
-            try:
-                slot.proc.kill()
-            except Exception:
-                pass
-        if next_mode == "vcam" and r._dll64:
-            threading.Thread(
-                target=r._ensure_ucap_devices,
-                args=(slot.index + 1,),
-                daemon=True,
-                name=f"ucap-demand-{slot.index}",
-            ).start()
-        r._log_msg(f"Cam {slot.index + 1}: mode → {next_mode}")
-
     def action_copy_obs_input(self) -> None:
         slot = self._selected_slot()
         if slot is None:
@@ -1452,22 +1105,10 @@ def _parse_args() -> argparse.Namespace:
                    help="SRT receive latency in milliseconds (default: 80)")
     p.add_argument("--ffmpeg",        type=str,  default=None,  metavar="PATH",
                    help="Path to ffmpeg executable (default: ffmpeg from PATH)")
-    p.add_argument("--direct-to-obs",  action="store_true",
+    p.add_argument("--direct-to-obs", action="store_true",
                    help="Skip relay — give OBS the raw SRT URL instead of a UDP relay")
-    p.add_argument("--relay-to-obs",   action="store_true",
+    p.add_argument("--relay-to-obs",  action="store_true",
                    help="Force relay mode even if --direct-to-obs was previously set")
-    p.add_argument("--ndi",            action="store_true",
-                   help="Also send each slot as an NDI source (requires NDI-enabled FFmpeg)")
-    p.add_argument("--webcam",         action="store_true",
-                   help="Output slot 0 as a virtual webcam via OBS Virtual Camera (no install required). "
-                        "Unity Capture DLLs are optional and used only when VCAM mode is selected via the M key. "
-                        "Use --ndi for multi-camera virtual output.")
-    p.add_argument("--webcam-width",   type=int, default=1280, metavar="PX",
-                   help="Virtual webcam output width in pixels (default: 1280)")
-    p.add_argument("--webcam-height",  type=int, default=720,  metavar="PX",
-                   help="Virtual webcam output height in pixels (default: 720)")
-    p.add_argument("--webcam-fps",     type=int, default=30,   metavar="FPS",
-                   help="Virtual webcam output frame rate (default: 30)")
     args = p.parse_args()
     if args.relay_to_obs:
         args.direct_to_obs = False

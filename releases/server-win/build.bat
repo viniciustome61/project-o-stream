@@ -1,5 +1,5 @@
 @echo off
-title Build receiver.exe
+title Build server.exe
 
 echo [build] Installing PyInstaller...
 python -m pip install pyinstaller --quiet --no-cache-dir --no-warn-script-location
@@ -10,9 +10,6 @@ python -m PyInstaller ^
     --clean ^
     --name server ^
     --collect-all textual ^
-    --collect-all pyvirtualcam ^
-    --hidden-import=pyvirtualcam ^
-    --hidden-import=numpy ^
     --noconfirm ^
     "%~dp0receiver.py"
 
