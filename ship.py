@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ship.py – AI-crafted commits → push → CI wait → IPA download."""
+"""ship.py – AI commits → push → CI wait → IPA/APK download → GitHub release."""
 
 import argparse
 import json
@@ -230,6 +230,133 @@ def download_ipa(token: str, owner: str, repo: str, art_id: int, dest: Path) -> 
     download_artifact_file(token, owner, repo, art_id, dest, ".ipa")
 
 
+# ── versioning ────────────────────────────────────────────────────────────────
+
+def latest_version(token: str, owner: str, repo: str) -> tuple[int, int, int]:
+    """Return (major, minor, patch) of the latest release tag, or (0, 0, 0)."""
+    try:
+        data = gh(token, "GET", f"/repos/{owner}/{repo}/releases/latest")
+        if isinstance(data, dict):
+            m = re.match(r"v?(\d+)\.(\d+)\.(\d+)", data.get("tag_name", ""))
+            if m:
+                return int(m.group(1)), int(m.group(2)), int(m.group(3))
+    except Exception:
+        pass
+    try:
+        out = run_git(["tag", "--sort=-version:refname", "--list", "v*.*.*"], capture=True)
+        for tag in out.splitlines():
+            m = re.match(r"v?(\d+)\.(\d+)\.(\d+)", tag.strip())
+            if m:
+                return int(m.group(1)), int(m.group(2)), int(m.group(3))
+    except Exception:
+        pass
+    return 0, 0, 0
+
+
+def bump_version(major: int, minor: int, patch: int, bump: str) -> str:
+    if bump == "major":
+        return f"v{major + 1}.0.0"
+    if bump == "minor":
+        return f"v{major}.{minor + 1}.0"
+    return f"v{major}.{minor}.{patch + 1}"
+
+
+def commits_since_tag(tag: str | None) -> list[str]:
+    """Return subject lines of commits from tag..HEAD (or last 20 if no tag)."""
+    try:
+        ref = f"{tag}..HEAD" if tag else "HEAD~20..HEAD"
+        out = run_git(["log", ref, "--format=%s", "--no-merges"], capture=True)
+        return [l.strip() for l in out.splitlines() if l.strip()]
+    except Exception:
+        return []
+
+
+def gemini_version_bump(commit_msgs: list[str]) -> tuple[str, str]:
+    """Ask Gemini for bump type + one-line reason. Returns (bump, reason)."""
+    msgs_block = "\n".join(f"  - {m}" for m in commit_msgs[:30])
+    stdin_prompt = f"""You are a senior engineer applying semantic versioning (semver 2.0).
+
+Classify the version bump type based on these commit messages:
+- "major": breaking change, incompatible behaviour, complete redesign
+- "minor": new user-facing feature or significant improvement (backwards-compatible)
+- "patch": bug fix, internal refactor, dependency bump, chore, docs
+
+Commit messages:
+{msgs_block}
+
+Output ONLY a raw JSON object (no markdown, no extra text):
+{{"bump": "major"|"minor"|"patch", "reason": "one short sentence"}}"""
+
+    env = {**os.environ, "GEMINI_CLI_TRUST_WORKSPACE": "true"}
+    try:
+        result = subprocess.run(
+            [_gemini_exe(), "-p", "Return the JSON as instructed. No markdown."],
+            input=stdin_prompt,
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+            env=env, cwd=REPO_ROOT, timeout=60,
+        )
+        if result.returncode == 0:
+            data = _extract_json(result.stdout)
+            bump = data.get("bump", "patch")
+            if bump not in ("major", "minor", "patch"):
+                bump = "patch"
+            return bump, data.get("reason", "")
+    except Exception:
+        pass
+    return "patch", "could not reach Gemini"
+
+
+def release_notes(commit_msgs: list[str]) -> str:
+    if not commit_msgs:
+        return "See commit history."
+    return "\n".join(f"- {m}" for m in commit_msgs)
+
+
+# ── GitHub releases ───────────────────────────────────────────────────────────
+
+def create_github_release(
+    token: str, owner: str, repo: str,
+    tag: str, sha: str, body: str,
+) -> tuple[int, str]:
+    """Create a GitHub release. Returns (release_id, upload_url)."""
+    data = gh(token, "POST", f"/repos/{owner}/{repo}/releases", payload={
+        "tag_name": tag,
+        "target_commitish": sha,
+        "name": tag,
+        "body": body,
+        "draft": False,
+        "prerelease": False,
+    }, ok={201})
+    assert isinstance(data, dict)
+    return int(data["id"]), data["upload_url"]
+
+
+def upload_release_asset(token: str, upload_url: str, path: Path) -> None:
+    """Upload a file as a GitHub release asset."""
+    base_url = upload_url.split("{")[0]
+    url = f"{base_url}?{urllib.parse.urlencode({'name': path.name})}"
+    ext = path.suffix.lower()
+    content_type = (
+        "application/vnd.android.package-archive" if ext == ".apk"
+        else "application/octet-stream"
+    )
+    req = urllib.request.Request(
+        url=url, method="POST",
+        headers={
+            "Authorization": f"token {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "Content-Type": content_type,
+            "Content-Length": str(path.stat().st_size),
+        },
+        data=path.read_bytes(),
+    )
+    with urllib.request.urlopen(req) as resp:
+        if resp.getcode() not in (200, 201):
+            raise RuntimeError(f"Asset upload failed: HTTP {resp.getcode()}")
+
+
 # ── Gemini CLI ────────────────────────────────────────────────────────────────
 
 def _extract_json(text: str) -> dict:
@@ -392,9 +519,69 @@ def parse_args() -> argparse.Namespace:
                    help="Commit + push only; skip CI wait and IPA download.")
     p.add_argument("--run-id", type=int, default=None,
                    help="Skip commit/push/wait; download IPA from this completed run ID.")
+    p.add_argument("--no-release", action="store_true",
+                   help="Skip GitHub release creation and version tagging.")
     p.add_argument("--timeout", type=int, default=3600)
     p.add_argument("--poll", type=int, default=10)
     return p.parse_args()
+
+
+def _propose_version(
+    token: str, owner: str, repo: str,
+    cur_maj: int, cur_min: int, cur_pat: int,
+) -> str | None:
+    """Interactively propose a version tag. Returns the chosen tag or None to skip."""
+    cur_ver = f"v{cur_maj}.{cur_min}.{cur_pat}" if (cur_maj or cur_min or cur_pat) else None
+
+    msgs = commits_since_tag(cur_ver)
+    if not msgs:
+        msgs = commits_since_tag(None)
+
+    print(f"[gemini] Analyzing {len(msgs)} commit(s) for version bump...")
+    bump, reason = gemini_version_bump(msgs)
+    new_ver = bump_version(cur_maj, cur_min, cur_pat, bump)
+
+    from_label = f"{cur_ver} → " if cur_ver else ""
+    print(f"[ship] Version: {from_label}{new_ver}  ({bump}: {reason})")
+
+    ans = input(
+        f"Tag as {new_ver}? [Y / n=skip release / major/minor/patch=override] "
+    ).strip().lower()
+
+    if ans == "n":
+        print("[ship] Skipping release.")
+        return None
+    if ans in ("major", "minor", "patch"):
+        new_ver = bump_version(cur_maj, cur_min, cur_pat, ans)
+        print(f"[ship] Version override: {new_ver}")
+    elif re.match(r"v\d+\.\d+\.\d+$", ans):
+        new_ver = ans
+        print(f"[ship] Version manual: {new_ver}")
+    # else Y / empty → accept suggestion
+
+    return new_ver
+
+
+def _publish_release(
+    token: str, owner: str, repo: str,
+    tag: str, sha: str, cur_tag: str | None,
+    ipa_path: Path | None, apk_path: Path | None,
+) -> None:
+    """Create a GitHub release and upload build artifacts."""
+    msgs = commits_since_tag(cur_tag)
+    body = release_notes(msgs)
+
+    print(f"[ship] Creating GitHub release {tag}...")
+    _, upload_url = create_github_release(token, owner, repo, tag, sha, body)
+
+    for asset in [p for p in [ipa_path, apk_path] if p and p.exists()]:
+        print(f"[ship] Uploading {asset.name}...")
+        try:
+            upload_release_asset(token, upload_url, asset)
+        except Exception as exc:
+            print(f"[ship] Upload failed for {asset.name}: {exc}")
+
+    print(f"[ship] Release: https://github.com/{owner}/{repo}/releases/tag/{tag}")
 
 
 def main() -> int:
@@ -406,18 +593,23 @@ def main() -> int:
 
     print(f"[ship] {owner}/{repo}  branch={branch}")
 
-    # ── shortcut: download IPA from a known run ───────────────────────────────
+    # ── shortcut: download artifacts from a known run ─────────────────────────
     if args.run_id:
         print(f"[ship] --run-id {args.run_id}: skipping commit/push/wait.")
-        short_sha = run_git(["rev-parse", "--short", "HEAD"], capture=True)
+        head_sha = run_git(["rev-parse", "HEAD"], capture=True)
+        short_sha = head_sha[:7]
         name = app_name()
+
+        latest_ipa = REPO_ROOT / "releases" / f"{name}-unsigned.ipa"
+        latest_apk: Path | None = None
+
         print("[ship] Downloading IPA...")
         art = artifact_id(token, owner, repo, args.run_id, args.artifact)
-        latest_ipa = REPO_ROOT / "releases" / f"{name}-unsigned.ipa"
         download_ipa(token, owner, repo, art, latest_ipa)
         for old in (REPO_ROOT / "releases").glob(f"{name}-unsigned-*.ipa"):
             old.unlink(missing_ok=True)
         print(f"[ship] {latest_ipa.name}  (build {short_sha})")
+
         try:
             apk_art = artifact_id(token, owner, repo, args.run_id, "android-debug-apk")
             latest_apk = REPO_ROOT / "releases" / f"{name}-debug.apk"
@@ -428,6 +620,15 @@ def main() -> int:
             print(f"[ship] {latest_apk.name}  (build {short_sha})")
         except Exception as exc:
             print(f"[ship] APK not available: {exc}")
+
+        if not args.no_release:
+            cur_maj, cur_min, cur_pat = latest_version(token, owner, repo)
+            cur_ver = f"v{cur_maj}.{cur_min}.{cur_pat}" if (cur_maj or cur_min or cur_pat) else None
+            tag = _propose_version(token, owner, repo, cur_maj, cur_min, cur_pat)
+            if tag:
+                run_git(["tag", tag, head_sha])
+                run_git(["push", "origin", tag])
+                _publish_release(token, owner, repo, tag, head_sha, cur_ver, latest_ipa, latest_apk)
         print()
         return 0
 
@@ -444,11 +645,25 @@ def main() -> int:
         else:
             print("[ship] No uncommitted changes.")
 
+    # ── version bump (proposed before push so tag lands on same commit) ───────
+    new_tag: str | None = None
+    cur_ver: str | None = None
+    if not args.no_release:
+        cur_maj, cur_min, cur_pat = latest_version(token, owner, repo)
+        cur_ver = f"v{cur_maj}.{cur_min}.{cur_pat}" if (cur_maj or cur_min or cur_pat) else None
+        new_tag = _propose_version(token, owner, repo, cur_maj, cur_min, cur_pat)
+        if new_tag:
+            head_sha_pre = run_git(["rev-parse", "HEAD"], capture=True)
+            run_git(["tag", new_tag, head_sha_pre])
+
     # ── push ──────────────────────────────────────────────────────────────────
     print("[ship] Pushing...")
     run_git(["push", "origin", branch])
+    if new_tag:
+        run_git(["push", "origin", new_tag])
+        print(f"[ship] Tag {new_tag} pushed.")
     head_sha = run_git(["rev-parse", "HEAD"], capture=True)
-    short_sha = run_git(["rev-parse", "--short", "HEAD"], capture=True)
+    short_sha = head_sha[:7]
     print(f"[ship] HEAD {short_sha} ({head_sha})")
 
     if args.skip_build:
@@ -466,16 +681,13 @@ def main() -> int:
     art = artifact_id(token, owner, repo, run_id, args.artifact)
     name = app_name()
     latest_ipa = REPO_ROOT / "releases" / f"{name}-unsigned.ipa"
-
     download_ipa(token, owner, repo, art, latest_ipa)
-
-    # Remove any old versioned IPAs left from previous runs
     for old in (REPO_ROOT / "releases").glob(f"{name}-unsigned-*.ipa"):
         old.unlink(missing_ok=True)
-
     print(f"[ship] {latest_ipa.name}  (build {short_sha})")
 
     # ── APK ───────────────────────────────────────────────────────────────────
+    latest_apk: Path | None = None
     try:
         apk_art = artifact_id(token, owner, repo, run_id, "android-debug-apk")
         latest_apk = REPO_ROOT / "releases" / f"{name}-debug.apk"
@@ -486,6 +698,10 @@ def main() -> int:
         print(f"[ship] {latest_apk.name}  (build {short_sha})")
     except Exception as exc:
         print(f"[ship] APK not available: {exc}")
+
+    # ── GitHub release ────────────────────────────────────────────────────────
+    if new_tag:
+        _publish_release(token, owner, repo, new_tag, head_sha, cur_ver, latest_ipa, latest_apk)
 
     print()
     return 0
