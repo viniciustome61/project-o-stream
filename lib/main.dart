@@ -465,6 +465,24 @@ class _SenderScreenState extends State<SenderScreen> {
         } else if (_config.autoReconnect) {
           _scheduleAutoConnect();
         }
+      } else if (action == 'stopStream') {
+        _dbg('Remote stop by ${datagram.address.address}');
+        _autoConnectTimer?.cancel();
+        if (_live) {
+          setState(() {
+            _busy = true;
+            _live = false;
+          });
+          try {
+            await NativeStreamer.stopStream();
+          } catch (_) {}
+          if (mounted) {
+            setState(() {
+              _busy = false;
+              _status = 'Stopped by server';
+            });
+          }
+        }
       }
     } catch (error) {
       _dbg('Remote control parse failed: $error');

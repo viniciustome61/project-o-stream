@@ -291,7 +291,8 @@ class SlotState:
         self.proc:          Optional[subprocess.Popen] = None  # type: ignore[type-arg]
         self.zoom_level:    float          = 1.0
         self.torch_on:      bool           = False
-        self.relay_mode:    str            = "obs"  # "obs" = UDP relay via FFmpeg | "srt" = OBS connects directly
+        self.relay_mode:    str            = "srt"  # "obs" = UDP relay via FFmpeg | "srt" = OBS connects directly
+        self.phone_slot_index: int         = 0      # slotIndex the phone expects in control commands (from telemetry)
 
     @property
     def connected(self) -> bool:
@@ -552,8 +553,12 @@ class Receiver:
         hostname = socket.gethostname()
         self._log_msg(f"Tailscale backup offers on UDP {DISC_PUSH_PORT}")
         while not self.stopping:
+            self._refresh_lan_ips()
             for peer_ip in _tailscale_peer_ips(self.tailscale_ip):
-                offer, _ = self._discovery_offer(peer_ip, hostname)
+                # lookup only — never create a slot just because a peer exists
+                known = self.assigner.lookup(peer_ip)
+                slot_idx = known if known is not None else 0
+                offer = self._slot_offer(slot_idx, self.tailscale_ip, hostname, self.lan_ip)
                 try:
                     sock.sendto(json.dumps(offer).encode(), (peer_ip, DISC_PUSH_PORT))
                 except Exception:
@@ -593,11 +598,12 @@ class Receiver:
                 continue
 
             slot_idx: Optional[int] = None
+            phone_slot: Optional[int] = None  # slotIndex the phone reports (its _receiver.slotIndex)
             requested_slot = payload.get("slotIndex")
             if isinstance(requested_slot, (int, float)) and not isinstance(requested_slot, bool):
-                requested_slot = int(requested_slot)
-                if 0 <= requested_slot < len(self.slots):
-                    slot_idx = requested_slot
+                phone_slot = int(requested_slot)
+                if 0 <= phone_slot < len(self.slots):
+                    slot_idx = phone_slot
                     self.assigner.bind(client_ip, slot_idx)
             if slot_idx is None:
                 slot_idx = self.assigner.lookup(client_ip)
@@ -605,6 +611,8 @@ class Receiver:
                 slot_idx = self.assigner.get(client_ip)
 
             slot = self.slots[slot_idx]
+            if phone_slot is not None:
+                slot.phone_slot_index = phone_slot
 
             # Hostname-based dedup: if another slot already owns this hostname,
             # remap this IP to that canonical slot and evict the duplicate.
@@ -786,7 +794,7 @@ class Receiver:
         payload = json.dumps({
             "service": "project-o-stream-control",
             "action": action,
-            "slotIndex": slot.index,
+            "slotIndex": slot.phone_slot_index,
             "sentAt": time.time(),
             **(params or {}),
         }).encode("utf-8")
@@ -1045,7 +1053,7 @@ class ReceiverApp(App[None]):
             except Exception:
                 pass
         # Ask phone to reconnect so it hits the new listener (OBS or FFmpeg) immediately
-        if slot.ip:
+        if slot.ip and slot.control_port:
             self._receiver.send_control(slot, "reconnect")
         mode_label = "SRT direct" if slot.relay_mode == "srt" else "UDP relay"
         self._receiver._log_msg(f"Cam {slot.index + 1}: switched to {mode_label}")
@@ -1121,17 +1129,23 @@ class ReceiverApp(App[None]):
 
     def action_kill_slot(self) -> None:
         slot = self._selected_slot()
-        if slot is not None:
-            if slot.proc and slot.proc.poll() is None:
-                try:
-                    slot.proc.kill()
-                    self._receiver._log_msg(f"Cam {slot.index + 1}: killed by user")
-                except Exception as e:
-                    self._receiver._log_msg(f"Cam {slot.index + 1}: kill failed: {e}")
-            else:
-                self._receiver._log_msg(f"Cam {slot.index + 1}: not running")
+        if slot is None:
+            return
+        if slot.relay_mode == "srt" and slot.ip and slot.control_port:
+            self._receiver.send_control(slot, "stopStream")
+        if slot.proc and slot.proc.poll() is None:
+            try:
+                slot.proc.kill()
+                self._receiver._log_msg(f"Cam {slot.index + 1}: killed by user")
+            except Exception as e:
+                self._receiver._log_msg(f"Cam {slot.index + 1}: kill failed: {e}")
+        elif slot.relay_mode != "srt":
+            self._receiver._log_msg(f"Cam {slot.index + 1}: not running")
 
     def action_quit_app(self) -> None:
+        for slot in self._receiver.slots:
+            if slot.relay_mode == "srt" and slot.ip and slot.control_port:
+                self._receiver.send_control(slot, "stopStream")
         self._receiver.stopping = True
         self.exit()
 
