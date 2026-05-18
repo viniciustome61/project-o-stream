@@ -117,24 +117,6 @@ project-o-stream/                ← Flutter project root (pubspec.yaml here)
 │   └── src-tauri/               Rust backend
 │
 ├── lib/                         Dart source
-...
-## Desktop Controller
-
-The `desktop/` directory contains a desktop-only application built with **Tauri 2** and **SvelteKit**. This work lives on `desktop/tauri-svelte`; mobile remains on `main`.
-
-### Development
-
-```bash
-cd desktop
-npm install
-npm run tauri dev
-```
-
-### Stack
-- **Framework**: SvelteKit
-- **Runtime**: Tauri 2 (Rust)
-- **Styling**: Tailwind CSS
-- **Visuals**: Glassmorphism, Dark Mode, Framer-motion-like Svelte transitions.
 │   ├── main.dart                UI — camera preview, stream controls, settings
 │   ├── discovery.dart           Zero-input receiver discovery (UDP)
 │   ├── native_streamer.dart     Flutter ↔ native method/event channel bridge
@@ -152,21 +134,19 @@ npm run tauri dev
 │       ├── CameraController.swift
 │       └── PreviewFactory.swift
 │
-├── server/                      PC receiver scripts
-│   ├── start-receiver.ps1       Main entry point — launches ffmpeg + discovery
-│   └── discovery-server.ps1     Discovery daemon (UDP 7071 probes / 7072 offers)
+├── server/                      PC receiver (Python Textual TUI)
+│   ├── receiver.py              Main TUI — SRT relay, discovery, telemetry, controls
+│   └── start-receiver.ps1       PowerShell launcher
 │
 ├── ops/                         Operator convenience scripts
-│   ├── start-receiver.ps1       Wrapper → server/start-receiver.ps1
-│   ├── start-discovery.ps1      Standalone discovery daemon launcher
-│   ├── launch-obs.ps1           Launches vendor OBS portable
 │   └── doctor.ps1               Pre-flight health check
 │
 ├── releases/
 │   └── server-win/              Self-contained distributable for Windows
-│       ├── start-receiver.ps1
-│       ├── discovery-server.ps1
-│       └── launch.bat           Double-click launcher (no PowerShell window needed)
+│       ├── receiver.py          Exact copy of server/receiver.py
+│       ├── server.exe           Single-file build (PyInstaller)
+│       ├── server.bat           Double-click launcher
+│       └── build.bat            Rebuilds server.exe from receiver.py
 │
 ├── docs/
 │   ├── ARCHITECTURE.md
@@ -176,6 +156,29 @@ npm run tauri dev
 │
 ├── pubspec.yaml
 └── vendor/obs-portable/         OBS runtime — NOT in git (user provides)
+```
+
+---
+
+## Desktop Controller
+
+The `desktop/` directory contains a desktop-only application built with **Tauri 2** and **SvelteKit**. This work lives on `desktop/tauri-svelte`; mobile remains on `main`.
+
+### Stack
+
+| Layer | Technology |
+| ----- | ---------- |
+| Framework | SvelteKit |
+| Runtime | Tauri 2 (Rust) |
+| Styling | Tailwind CSS |
+| Visuals | Glassmorphism · Dark mode · Svelte transitions |
+
+### Development
+
+```bash
+cd desktop
+npm install
+npm run tauri dev
 ```
 
 ---
