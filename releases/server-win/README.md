@@ -46,6 +46,18 @@ The receiver forwards to OBS at:
 udp://127.0.0.1:15000
 ```
 
+## OBS Auto Sources
+
+Load `obs_auto_sources.py` in OBS via `Tools > Scripts`. The script polls:
+
+```text
+http://127.0.0.1:7077/state
+```
+
+When the receiver assigns or sees a camera slot, OBS automatically gets a
+`Project-O Cam N` Media Source with the correct server input URL. When the
+receiver marks that slot disconnected, the script removes the source.
+
 ## Parameters
 
 ```powershell

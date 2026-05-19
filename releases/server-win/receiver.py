@@ -18,6 +18,7 @@ import sys
 import threading
 import time
 from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable, Optional
 
 from rich.text import Text
@@ -32,6 +33,8 @@ DISC_PORT       = 7071
 DISC_PUSH_PORT  = 7072
 TELE_PORT       = 7075
 CONTROL_PORT    = 7076
+OBS_STATE_HOST  = "127.0.0.1"
+OBS_STATE_PORT  = 7077
 SLOT_TTL        = 120
 TELE_FRESH      = 20
 PROBE_BYTES     = b"PROJECTO_STREAM_DISCOVER"
@@ -293,6 +296,7 @@ class SlotState:
         self.torch_on:      bool           = False
         self.relay_mode:    str            = "srt"  # "obs" = UDP relay via FFmpeg | "srt" = OBS connects directly
         self.phone_slot_index: int         = 0      # slotIndex the phone expects in control commands (from telemetry)
+        self.live:          bool           = False
 
     @property
     def connected(self) -> bool:
@@ -504,6 +508,7 @@ class Receiver:
                     slot.ip        = client_ip
                     slot.transport = transport
                     slot.tele_ts   = 0.0  # clear stale telemetry
+                    slot.live      = False
                     if old_ip:
                         # new phone taking over a stale slot — restart FFmpeg cleanly
                         if slot.proc and slot.proc.poll() is None:
@@ -629,6 +634,7 @@ class Receiver:
                     slot.ip = None
                     slot.hostname = None
                     slot.tele_ts = 0.0
+                    slot.live = False
                     self._log_msg(
                         f"Cam {slot_idx + 1}: duplicate IP {client_ip} remapped "
                         f"to Cam {canonical.index + 1} ({incoming_hostname})"
@@ -642,9 +648,12 @@ class Receiver:
                     _other.ip = None
                     _other.hostname = None
                     _other.tele_ts = 0.0
+                    _other.live = False
             slot.transport  = payload.get("transport") or _infer_transport(client_ip)
             slot.hostname   = incoming_hostname or slot.hostname
             slot.lens       = payload.get("lens") or slot.lens
+            if "live" in payload:
+                slot.live = bool(payload.get("live"))
             control_port    = payload.get("controlPort")
             if isinstance(control_port, (int, float)) and not isinstance(control_port, bool):
                 control_port = int(control_port)
@@ -717,6 +726,7 @@ class Receiver:
                     slot.ip       = None
                     slot.hostname = None
                     slot.tele_ts  = 0.0
+                    slot.live     = False
                     slot.battery  = None
                     slot.thermal  = None
                     slot.rtt_ms   = None
@@ -749,6 +759,86 @@ class Receiver:
                     ).start()
             time.sleep(0.5)
 
+    def _slot_should_have_obs_source(self, slot: SlotState) -> bool:
+        if slot.ip is None:
+            return False
+        if slot.tele_ts <= 0:
+            return True
+        return slot.tele_fresh
+
+    def obs_state(self) -> dict[str, object]:
+        slots: list[dict[str, object]] = []
+        for slot in list(self.slots):
+            obs_input = self.obs_input_url(slot)
+            mode = "srt" if self.args.direct_to_obs or slot.relay_mode == "srt" else "udp"
+            slots.append({
+                "index": slot.index,
+                "sourceName": f"Project-O Cam {slot.index + 1}",
+                "assigned": slot.ip is not None,
+                "connected": slot.connected,
+                "live": slot.live,
+                "obsSourcePresent": self._slot_should_have_obs_source(slot),
+                "obsInput": obs_input,
+                "obsInputUrl": obs_input,
+                "mode": mode,
+                "relayMode": slot.relay_mode,
+                "srtPort": slot.srt_port,
+                "obsUdpPort": slot.obs_port,
+                "ip": slot.ip,
+                "hostname": slot.hostname,
+                "lens": slot.lens,
+                "transport": slot.transport,
+                "telemetryAgeMs": None if slot.tele_ts <= 0 else int((time.time() - slot.tele_ts) * 1000),
+            })
+        return {
+            "service": "project-o-stream-receiver",
+            "version": 1,
+            "updatedAt": time.time(),
+            "directToObs": bool(self.args.direct_to_obs),
+            "latencyMs": self.args.latency,
+            "slots": slots,
+        }
+
+    def _obs_state_worker(self) -> None:
+        if self.args.no_obs_state_api:
+            return
+
+        receiver = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802
+                path = self.path.split("?", 1)[0].rstrip("/") or "/"
+                if path not in {"/", "/state"}:
+                    self.send_error(404)
+                    return
+                try:
+                    body = json.dumps(receiver.obs_state(), separators=(",", ":")).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                except Exception as e:
+                    self.send_error(500, str(e))
+
+            def log_message(self, _format: str, *_args: object) -> None:
+                return
+
+        try:
+            httpd = ThreadingHTTPServer((OBS_STATE_HOST, self.args.obs_state_port), Handler)
+            httpd.timeout = 0.5
+        except OSError as e:
+            self._log_msg(f"OBS state API bind failed on {OBS_STATE_HOST}:{self.args.obs_state_port}: {e}")
+            return
+
+        self._log_msg(f"OBS state API: http://{OBS_STATE_HOST}:{self.args.obs_state_port}/state")
+        try:
+            while not self.stopping:
+                httpd.handle_request()
+        finally:
+            httpd.server_close()
+
     # ------------------------------------------------------------------ run / shutdown
 
     def run(self) -> None:
@@ -758,6 +848,7 @@ class Receiver:
             (self._lan_offer_worker, "lan-offers"),
             (self._tailnet_offer_worker, "tailnet-offers"),
             (self._telemetry_worker, "telemetry"),
+            (self._obs_state_worker, "obs-state"),
             (self._relay_worker,     "relay"),
         ]:
             threading.Thread(target=target, daemon=True, name=name).start()
@@ -1177,6 +1268,10 @@ def _parse_args() -> argparse.Namespace:
                    help="Skip relay — give OBS the raw SRT URL instead of a UDP relay")
     p.add_argument("--relay-to-obs",  action="store_true",
                    help="Force relay mode even if --direct-to-obs was previously set")
+    p.add_argument("--obs-state-port", type=int, default=OBS_STATE_PORT, metavar="PORT",
+                   help=f"Local HTTP port for the OBS auto-source script (default: {OBS_STATE_PORT})")
+    p.add_argument("--no-obs-state-api", action="store_true",
+                   help="Disable the local OBS auto-source state endpoint")
     args = p.parse_args()
     if args.relay_to_obs:
         args.direct_to_obs = False

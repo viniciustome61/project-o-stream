@@ -352,15 +352,6 @@ class _SenderScreenState extends State<SenderScreen> {
     return ids.toSet().toList(growable: false);
   }
 
-  String _lensLabel(String lens) {
-    return switch (lens) {
-      'ultraWide' => '0.5x Ultra',
-      'telephoto' => 'Tele',
-      'front' => 'Front',
-      _ => '1x Wide',
-    };
-  }
-
   void _setAutoReconnect(bool value) {
     setState(() {
       _config = _config.copyWith(autoReconnect: value);
@@ -505,6 +496,7 @@ class _SenderScreenState extends State<SenderScreen> {
         'slotIndex': _receiver?.slotIndex ?? 0,
         'controlPort': _controlPort,
         'lens': _config.lens,
+        'live': _live,
       }));
       final socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
       socket.send(payload, InternetAddress(host), _telemetryPort);

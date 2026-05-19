@@ -282,15 +282,17 @@ class ReceiverDiscovery {
         if (dg == null || dg.address.address != host) return;
         if (utf8.decode(dg.data, allowMalformed: true) != _lanAck) return;
         final rtt = DateTime.now().millisecondsSinceEpoch - t0;
-        if (active != null && !active!.isCompleted) active!.complete(rtt);
+        final pending = active;
+        if (pending != null && !pending.isCompleted) pending.complete(rtt);
       });
 
       for (var i = 0; i < probes; i++) {
-        active = Completer<int?>();
+        final pending = Completer<int?>();
+        active = pending;
         t0 = DateTime.now().millisecondsSinceEpoch;
         socket.send(bytes, address, discoveryPort);
 
-        final rtt = await active!.future.timeout(
+        final rtt = await pending.future.timeout(
           Duration(milliseconds: perProbeTimeoutMs),
           onTimeout: () => null,
         );

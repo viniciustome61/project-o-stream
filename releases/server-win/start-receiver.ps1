@@ -1,9 +1,11 @@
 param(
     [int]$SrtPort    = 7070,
     [int]$ObsUdpPort = 15000,
+    [int]$ObsStatePort = 7077,
     [int]$LatencyMs  = 80,
     [int]$Cameras    = 1,
     [switch]$DirectToObs,
+    [switch]$NoObsStateApi,
     [switch]$Ndi,
     [switch]$NoDiscovery
 )
@@ -44,9 +46,11 @@ $pyArgs = @(
     "--cameras",  $Cameras,
     "--port",     $SrtPort,
     "--obs-port", $ObsUdpPort,
+    "--obs-state-port", $ObsStatePort,
     "--latency",  $LatencyMs
 )
 if ($DirectToObs) { $pyArgs += "--direct-to-obs" }
+if ($NoObsStateApi) { $pyArgs += "--no-obs-state-api" }
 if ($Ndi)         { $pyArgs += "--ndi" }
 
 # ---- launch ----------------------------------------------------------------
