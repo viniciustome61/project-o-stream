@@ -54,120 +54,94 @@ func (s *SlotState) IsConnected() bool {
 //	SlotAssigner 
 //=========================
 
-
-type SlotEntry struct {
-    Index    int
-    LastSeen time.Time
-}
-
 // SlotAssigner mapeia IPs para os Slots disponíveis
 type SlotAssigner struct {
-	mu    sync.Mutex
-	numSlots int
-	table map[string]SlotEntry // Mapeia IP -> Slot Entry
+	mu    sync.RWMutex   // Alterado para RWMutex para suportar RLock()
+	slots []*SlotState
+	table map[string]int // Mapeia IP -> Slot Index
 }
 
-
-func NewSlotAssigner(numSlots int) *SlotAssigner {
+func NewSlotAssigner(slots []*SlotState) *SlotAssigner {
 	return &SlotAssigner{
-		numSlots: numSlots,
-		table: make(map[string]SlotEntry),
+		slots: slots,
+		table: make(map[string]int),
 	}
 }
-
-// assigner := NewSlotAssigner(NumCameras)
-
-//=========================
-//	SlotAssigner Methods
-//=========================
 
 // Get encontra um slot existente para o IP ou aloca um novo
 func (a *SlotAssigner) Get(ip string) int {
-	a.mu.Lock()				// Trava totalmente (escrita exclusiva)
-	defer a.mu.Unlock()		// Garante que o lock será liberado
-
-	// Removendo slots expirados
-	now := time.Now();
-
-	for ip, entry := range a.table {
-		if now.Sub(entry.LastSeen) > SlotTTL {
-			delete(a.table,ip);
-		}
-	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
 
 	// Se já tem slot, devolve
-	if entry, exists := a.table[ip]; exists { 
-		entry.LastSeen = now;	// Atualiza a data atual
-		a.table[ip] = entry;			// passa a nova data do ip
-		return entry.Index
+	if idx, exists := a.table[ip]; exists {
+		return idx
 	}
 
-	// Descobre quais slots estao sendo usados
+	// Procura um slot livre (sem IP ou com telemetria expirada)
+	for i, slot := range a.slots {
+		slot.mu.RLock()
+		isFree := slot.IP == "" || time.Since(slot.TeleTS) > SlotTTL
+		slot.mu.RUnlock()
 
-	used := make(map[int]bool);
-
-	for _, entry := range a.table {
-		used[entry.Index] = true;
-	}
-
-	// Procura um slot livre (sem IP)
-	for i := range a.slots {
-		if !used[i] {
-			a.table[ip] = SlotEntry{Index, i , LastSeen: now,};
-			return i;
+		if isFree {
+			a.table[ip] = i
+			return i
 		}
 	}
 
-	return 0;
+	// Fallback (se tudo estiver cheio, sobrescreve o primeiro)
+	a.table[ip] = 0
+	return 0
 }
 
-//  Funcao responsavel consultar o ip 
+// Lookup: Função responsável por consultar o IP
 func (a *SlotAssigner) Lookup(ip string) (int, bool) {
+	a.mu.RLock()
+	defer a.mu.RUnlock() // Correção: era Unlock, mudei para RUnlock
 
-	a.mu.RLock();
-	defer a.mu.Unlock();
-
-	entry, exists := a.table[ip];
+	idx, exists := a.table[ip]
 	if !exists {
 		return 0, false
 	}
 
-	if time.Since(entry.LastSeen) > SlotTTL {
-		delete(a.table, ip);
+	// Verifica se o slot expirou olhando diretamente para o SlotState
+	slot := a.slots[idx]
+	slot.mu.RLock()
+	expired := time.Since(slot.TeleTS) > SlotTTL
+	slot.mu.RUnlock()
+
+	if expired {
 		return 0, false
 	}
 
-	return entry.Index,true;
-
+	return idx, true
 }
 
-// Função responsavel por criar um novo bind
+// Bind: Função responsável por criar um novo bind
 func (a *SlotAssigner) Bind(ip string, slot int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 
-	a.mu.Lock();
-	defer a.mu.Unlock();
-
-	if slot < 0 || slot >= len(a.slots)
-		return;
-
-	a.table[ip] = SlotEntry{Index: slot, LastSeen: time.Now(),}
-
-}
-
-// Função responsavel por reconfigurar o slot do slotAssigner
-func (a *SlotAssigner) Remap(ip string,newSlot int) {
-	a.mu.Lock();
-	defer a.mu.Unlock();
-
-	if entry, exists := a.table[ip]; exists {
-		entry.Index = newSlot;
-		entry.LastSeen = time.Now();
-		a.table[ip] = entry;
+	// Correção: Adicionado as chaves {} no if
+	if slot < 0 || slot >= len(a.slots) {
+		return
 	}
 
+	a.table[ip] = slot
 }
 
+// Remap: Função responsável por reconfigurar o slot
+func (a *SlotAssigner) Remap(ip string, newSlot int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 
+	if _, exists := a.table[ip]; exists {
+		if newSlot >= 0 && newSlot < len(a.slots) {
+			a.table[ip] = newSlot
+		}
+	}
+}
 // --- WORKERS ---
 
 // 1. Discovery Worker: Ouve pings UDP do app e responde com a oferta (portas)
@@ -378,7 +352,7 @@ func main() {
 		}
 	}
 
-	assigner := NewSlotAssigner(NumCameras);
+assigner := NewSlotAssigner(slots)
 
 	// Iniciar Goroutines (equivalente às threads do Python)
 	go discoveryWorker(assigner, slots)
