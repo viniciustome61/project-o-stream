@@ -50,9 +50,13 @@ func (s *SlotState) IsConnected() bool {
 	return s.IP != "" && time.Since(s.TeleTS) < TeleFresh
 }
 
+//=========================
+//	SlotAssigner 
+//=========================
+
 // SlotAssigner mapeia IPs para os Slots disponíveis
 type SlotAssigner struct {
-	mu    sync.Mutex
+	mu    sync.RWMutex   // Alterado para RWMutex para suportar RLock()
 	slots []*SlotState
 	table map[string]int // Mapeia IP -> Slot Index
 }
@@ -91,6 +95,53 @@ func (a *SlotAssigner) Get(ip string) int {
 	return 0
 }
 
+// Lookup: Função responsável por consultar o IP
+func (a *SlotAssigner) Lookup(ip string) (int, bool) {
+	a.mu.RLock()
+	defer a.mu.RUnlock() // Correção: era Unlock, mudei para RUnlock
+
+	idx, exists := a.table[ip]
+	if !exists {
+		return 0, false
+	}
+
+	// Verifica se o slot expirou olhando diretamente para o SlotState
+	slot := a.slots[idx]
+	slot.mu.RLock()
+	expired := time.Since(slot.TeleTS) > SlotTTL
+	slot.mu.RUnlock()
+
+	if expired {
+		return 0, false
+	}
+
+	return idx, true
+}
+
+// Bind: Função responsável por criar um novo bind
+func (a *SlotAssigner) Bind(ip string, slot int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	// Correção: Adicionado as chaves {} no if
+	if slot < 0 || slot >= len(a.slots) {
+		return
+	}
+
+	a.table[ip] = slot
+}
+
+// Remap: Função responsável por reconfigurar o slot
+func (a *SlotAssigner) Remap(ip string, newSlot int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if _, exists := a.table[ip]; exists {
+		if newSlot >= 0 && newSlot < len(a.slots) {
+			a.table[ip] = newSlot
+		}
+	}
+}
 // --- WORKERS ---
 
 // 1. Discovery Worker: Ouve pings UDP do app e responde com a oferta (portas)
@@ -301,7 +352,7 @@ func main() {
 		}
 	}
 
-	assigner := NewSlotAssigner(slots)
+assigner := NewSlotAssigner(slots)
 
 	// Iniciar Goroutines (equivalente às threads do Python)
 	go discoveryWorker(assigner, slots)
