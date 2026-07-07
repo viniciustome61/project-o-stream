@@ -56,7 +56,7 @@ func (s *SlotState) IsConnected() bool {
 
 // SlotAssigner mapeia IPs para os Slots disponíveis
 type SlotAssigner struct {
-	mu    sync.RWMutex   // Alterado para RWMutex para suportar RLock()
+	mu    sync.RWMutex   
 	slots []*SlotState
 	table map[string]int // Mapeia IP -> Slot Index
 }
@@ -97,9 +97,11 @@ func (a *SlotAssigner) Get(ip string) int {
 
 // Lookup: Função responsável por consultar o IP
 func (a *SlotAssigner) Lookup(ip string) (int, bool) {
-	a.mu.RLock()
-	defer a.mu.RUnlock() // Correção: era Unlock, mudei para RUnlock
+	a.mu.RLock()		 // Adquire um bloqueio de leitura (Read Lock)
+	defer a.mu.RUnlock() // Agenda a liberação do bloqueio de leitura
 
+	// 'idx' recebe o índice encontrado.
+	// 'exists' informa se o IP realmente existe no mapa.
 	idx, exists := a.table[ip]
 	if !exists {
 		return 0, false
@@ -107,14 +109,22 @@ func (a *SlotAssigner) Lookup(ip string) (int, bool) {
 
 	// Verifica se o slot expirou olhando diretamente para o SlotState
 	slot := a.slots[idx]
-	slot.mu.RLock()
-	expired := time.Since(slot.TeleTS) > SlotTTL
-	slot.mu.RUnlock()
 
+	// permitindo ler seus dados de forma segura enquanto 
+	// outras goroutines também podem consultá-lo simultaneamente.
+	slot.mu.RLock()	
+	
+	expired := time.Since(slot.TeleTS) > SlotTTL
+	slot.mu.RUnlock() // Libera o bloqueio de leitura do SlotState.
+
+	// Se o slot expirou, a associação não é mais considerada válida,
+	// mesmo que ainda exista na tabela de associação.
 	if expired {
 		return 0, false
 	}
 
+	// Caso o IP exista e o slot ainda esteja ativo,
+	// retorna o índice correspondente e true.
 	return idx, true
 }
 
