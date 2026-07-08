@@ -139,6 +139,7 @@ def _ensure_source(source_name: str, input_url: str) -> None:
     settings = _media_settings(input_url)
     source = obs.obs_get_source_by_name(source_name)
     created = False
+    previous_url = _managed.get(source_name)
 
     try:
         if source is None:
@@ -147,13 +148,14 @@ def _ensure_source(source_name: str, input_url: str) -> None:
             if source is None:
                 _log(obs.LOG_ERROR, source_name, f"Project-O: failed to create {source_name}")
                 return
-        else:
+        elif previous_url != input_url:
+            # Updating an ffmpeg_source restarts playback, so only touch it
+            # when the input URL actually changed.
             obs.obs_source_update(source, settings)
 
         if not _add_source_to_current_scene(source, source_name):
             return
 
-        previous_url = _managed.get(source_name)
         _managed[source_name] = input_url
         if created:
             _log(obs.LOG_INFO, source_name, f"Project-O: added {source_name} -> {input_url}")

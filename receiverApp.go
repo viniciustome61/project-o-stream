@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
 	"strings"
@@ -86,7 +88,46 @@ func (r *Receiver) LogMsg(msg string) {
 }
 
 func (r *Receiver) SendControl(slot *SlotState, cmd string, params ...map[string]interface{}) {
-	r.LogMsg(fmt.Sprintf("Enviando comando '%s' para Câmera %d", cmd, slot.Index+1))
+	slot.mu.RLock()
+	ip := slot.IP
+	phoneSlot := slot.PhoneSlotIndex
+	slot.mu.RUnlock()
+
+	if ip == "" {
+		r.LogMsg(fmt.Sprintf("Cam %d: sem endereço do telemóvel para controlo remoto", slot.Index+1))
+		return
+	}
+
+	payload := map[string]interface{}{
+		"service":   "project-o-stream-control",
+		"action":    cmd,
+		"slotIndex": phoneSlot,
+		"sentAt":    float64(time.Now().UnixMilli()) / 1000.0,
+	}
+	for _, p := range params {
+		for k, v := range p {
+			payload[k] = v
+		}
+	}
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+
+	conn, err := net.Dial("udp", net.JoinHostPort(ip, fmt.Sprintf("%d", ControlPort)))
+	if err != nil {
+		r.LogMsg(fmt.Sprintf("Cam %d: controlo remoto '%s' falhou: %v", slot.Index+1, cmd, err))
+		return
+	}
+	defer conn.Close()
+
+	// UDP é não-fiável — envia 3x como o receiver.py
+	for i := 0; i < 3; i++ {
+		conn.Write(data)
+		time.Sleep(40 * time.Millisecond)
+	}
+	r.LogMsg(fmt.Sprintf("Cam %d: comando '%s' enviado para %s:%d", slot.Index+1, cmd, ip, ControlPort))
 }
 
 func (r *Receiver) CopyObsInput(slot *SlotState) {
@@ -99,14 +140,25 @@ func (r *Receiver) CopyObsInput(slot *SlotState) {
 }
 
 func (r *Receiver) KillSlotProcess(slot *SlotState) {
-	r.LogMsg(fmt.Sprintf("Câmera %d: processo finalizado pelo utilizador", slot.Index+1))
+	slot.mu.Lock()
+	proc := slot.Proc
+	slot.mu.Unlock()
+
+	if proc == nil || proc.Process == nil {
+		r.LogMsg(fmt.Sprintf("Cam %d: nenhum processo FFmpeg ativo", slot.Index+1))
+		return
+	}
+	if err := proc.Process.Kill(); err != nil {
+		r.LogMsg(fmt.Sprintf("Cam %d: falha ao matar FFmpeg: %v", slot.Index+1, err))
+		return
+	}
+	r.LogMsg(fmt.Sprintf("Cam %d: FFmpeg finalizado pelo utilizador (reinicia em 3s)", slot.Index+1))
 }
 
 // TUI
 
 // SlotMetadata guarda os estados que não existem no SlotState
 type SlotMetadata struct {
-	RelayMode string
 	TorchOn   bool
 	ZoomLevel float64
 }
@@ -147,7 +199,7 @@ func (a *ReceiverApp) getMeta(index int) *SlotMetadata {
 	if meta, exists := a.metaMap[index]; exists {
 		return meta
 	}
-	newMeta := &SlotMetadata{RelayMode: "obs", ZoomLevel: 1.0}
+	newMeta := &SlotMetadata{ZoomLevel: 1.0}
 	a.metaMap[index] = newMeta
 	return newMeta
 }
@@ -159,7 +211,7 @@ func (a *ReceiverApp) setupUI() {
 		a.Table.SetCell(0, i, tview.NewTableCell(col).SetTextColor(tcell.ColorYellow).SetSelectable(false))
 	}
 
-	a.Footer.SetText(" [c] Copy OBS  [s] Copy log  [m] Mode  [l] Lens  [t] Torch  [z] Zoom+  [x] Zoom-  [k] Kill slot")
+	a.Footer.SetText(" [yellow]c[-] Copy OBS  [yellow]s[-] Copy log  [yellow]m[-] Mode  [yellow]l[-] Lens  [yellow]t[-] Torch  [yellow]z[-] Zoom+  [yellow]x[-] Zoom-  [yellow]k[-] Kill slot  [yellow]q[-] Quit")
 
 	// Atalhos
 	a.App.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
@@ -185,6 +237,9 @@ func (a *ReceiverApp) setupUI() {
 			a.actionZoomOut()
 		case 'k': // Força o encerramento da câmera selecionada (caso trave)
 			a.actionKillSlot()
+		case 'q': // Encerra o receiver
+			a.actionQuit()
+			return nil
 		}
 		return event
 	})
@@ -340,12 +395,13 @@ func (a *ReceiverApp) updateSlotRow(s *SlotState) {
 	}
 
 	// 8. OBS INPUT
+	srtDirect := a.Receiver.Args.DirectToObs || s.RelayMode == "srt"
 	obsDisplay := fmt.Sprintf("udp://127.0.0.1:%d", s.OBSPort)
-	if a.Receiver.Args.DirectToObs || meta.RelayMode == "srt" {
+	if srtDirect {
 		obsDisplay = fmt.Sprintf("srt://0.0.0.0:%d", s.SRTPort)
 	}
 	obsColor := "dim"
-	if isConnected || a.Receiver.Args.DirectToObs || meta.RelayMode == "srt" {
+	if isConnected || srtDirect {
 		obsColor = "green"
 	}
 	obsText := fmt.Sprintf("[%s]%s[-]", obsColor, obsDisplay)
@@ -361,7 +417,7 @@ func (a *ReceiverApp) updateSlotRow(s *SlotState) {
 		status = fmt.Sprintf("[red]%s[-]", st)
 	}
 
-	if meta.RelayMode == "srt" {
+	if srtDirect {
 		status += "  [aqua::b][SRT][-:-:-]"
 	}
 	if isConnected {
@@ -408,16 +464,25 @@ func (a *ReceiverApp) actionCycleRelayMode() {
 		return
 	}
 
-	meta := a.getMeta(slot.Index)
-	if meta.RelayMode == "obs" {
-		meta.RelayMode = "srt"
+	slot.mu.Lock()
+	if slot.RelayMode == "obs" {
+		slot.RelayMode = "srt"
 	} else {
-		meta.RelayMode = "obs"
+		slot.RelayMode = "obs"
+	}
+	newMode := slot.RelayMode
+	proc := slot.Proc
+	slot.mu.Unlock()
+
+	// Ao mudar para SRT direto, mata o FFmpeg para libertar a porta;
+	// o relayWorker vê o novo modo e não reinicia
+	if newMode == "srt" && proc != nil && proc.Process != nil {
+		proc.Process.Kill()
 	}
 
-	// Notifica
+	// O telemóvel tem de reconectar para o OBS apanhar o novo caminho
 	a.Receiver.SendControl(slot, "reconnect")
-	a.Receiver.LogMsg(fmt.Sprintf("Cam %d: switched to %s", slot.Index+1, meta.RelayMode))
+	a.Receiver.LogMsg(fmt.Sprintf("Cam %d: switched to %s", slot.Index+1, newMode))
 }
 
 func (a *ReceiverApp) actionCycleLens() {
@@ -506,8 +571,11 @@ func (a *ReceiverApp) actionKillSlot() {
 
 func (a *ReceiverApp) actionQuit() {
 	for _, slot := range a.Receiver.Slots {
-		meta := a.getMeta(slot.Index)
-		if meta.RelayMode == "srt" && slot.IP != "" {
+		slot.mu.RLock()
+		srtMode := slot.RelayMode == "srt"
+		hasPhone := slot.IP != ""
+		slot.mu.RUnlock()
+		if srtMode && hasPhone {
 			a.Receiver.SendControl(slot, "stopStream")
 		}
 	}
