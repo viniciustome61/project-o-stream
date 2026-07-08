@@ -53,3 +53,6 @@ config/
 basic/
 profiles/
 scenes/
+bin/
+__pycache__/
+*.pyc
